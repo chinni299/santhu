@@ -12,6 +12,9 @@ import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../theme/app_theme.dart';
+import '../widgets/wave_clipper.dart';
+
 
 class ChatScreen extends StatefulWidget {
   final int currentUserId;
@@ -1462,122 +1465,122 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final otherUserName = widget.currentUserId == 1 ? 'User 2' : 'User 1';
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final otherUserName = widget.currentUserId == 1 ? 'Leslie' : 'User 1';
 
     return Scaffold(
-      backgroundColor: const Color(0xFFECE5DD), // Classic Warm WhatsApp Light Wallpaper
-
-      // APPBAR / CONTEXTUAL WHATSAPP TOP BAR
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(60),
-        child: selectedMessage != null
-            ? Container(
-                decoration: const BoxDecoration(
-                  color: Color(0xFF075E54),
-                  boxShadow: [
-                    BoxShadow(color: Color(0x33000000), blurRadius: 6, offset: Offset(0, 3)),
-                  ],
-                ),
-                child: SafeArea(
-                  child: Row(
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
-                        onPressed: () => setState(() => selectedMessage = null),
-                      ),
-                      const Text(
-                        "1",
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 19,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const Spacer(),
-                      IconButton(
-                        icon: const Icon(Icons.reply_rounded, color: Colors.white),
-                        tooltip: 'Reply',
-                        onPressed: () => _startReplying(selectedMessage!),
-                      ),
-                      if (selectedMessage!['message'] != null && selectedMessage!['message'].toString().isNotEmpty)
-                        IconButton(
-                          icon: const Icon(Icons.copy_rounded, color: Colors.white),
-                          tooltip: 'Copy',
-                          onPressed: () {
-                            _copyToClipboard(selectedMessage!['message'].toString());
-                            setState(() => selectedMessage = null);
-                          },
-                        ),
-                      if (selectedMessage!['isMe'] == true &&
-                          selectedMessage!['attachmentUrl'] == null &&
-                          selectedMessage!['isDeleted'] != true)
-                        IconButton(
-                          icon: const Icon(Icons.edit_rounded, color: Colors.white),
-                          tooltip: 'Edit',
-                          onPressed: () => _startEditing(selectedMessage!),
-                        ),
-                      if (selectedMessage!['isMe'] == true && selectedMessage!['isDeleted'] != true)
-                        IconButton(
-                          icon: const Icon(Icons.delete_rounded, color: Colors.white),
-                          tooltip: 'Delete',
-                          onPressed: () => _confirmDelete(selectedMessage!),
-                        ),
-                    ],
-                  ),
-                ),
-              )
-            : Container(
+      backgroundColor: isDark ? const Color(0xFF121E24) : const Color(0xFFF5F7F8),
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            // Wave Header App Bar
+            if (selectedMessage != null)
+              Container(
+                height: 95,
+                padding: const EdgeInsets.only(top: 40, left: 12, right: 12),
                 decoration: const BoxDecoration(
                   gradient: LinearGradient(
-                    colors: [Color(0xFF075E54), Color(0xFF128C7E)],
+                    colors: [Color(0xFF0F766E), Color(0xFF149B9B)],
                     begin: Alignment.topLeft,
                     end: Alignment.bottomRight,
                   ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Color(0x22000000),
-                      blurRadius: 6,
-                      offset: Offset(0, 3),
+                ),
+                child: Row(
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
+                      onPressed: () => setState(() => selectedMessage = null),
                     ),
+                    const Text(
+                      "1 Selected",
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(Icons.reply_rounded, color: Colors.white),
+                      tooltip: 'Reply',
+                      onPressed: () => _startReplying(selectedMessage!),
+                    ),
+                    if (selectedMessage!['message'] != null && selectedMessage!['message'].toString().isNotEmpty)
+                      IconButton(
+                        icon: const Icon(Icons.copy_rounded, color: Colors.white),
+                        tooltip: 'Copy',
+                        onPressed: () {
+                          _copyToClipboard(selectedMessage!['message'].toString());
+                          setState(() => selectedMessage = null);
+                        },
+                      ),
+                    if (selectedMessage!['isMe'] == true &&
+                        selectedMessage!['attachmentUrl'] == null &&
+                        selectedMessage!['isDeleted'] != true)
+                      IconButton(
+                        icon: const Icon(Icons.edit_rounded, color: Colors.white),
+                        tooltip: 'Edit',
+                        onPressed: () => _startEditing(selectedMessage!),
+                      ),
+                    if (selectedMessage!['isMe'] == true && selectedMessage!['isDeleted'] != true)
+                      IconButton(
+                        icon: const Icon(Icons.delete_rounded, color: Colors.white),
+                        tooltip: 'Delete',
+                        onPressed: () => _confirmDelete(selectedMessage!),
+                      ),
                   ],
                 ),
-                child: SafeArea(
+              )
+            else
+              ClipPath(
+                clipper: WaveHeaderClipper(),
+                child: Container(
+                  padding: const EdgeInsets.only(top: 45, left: 16, right: 16, bottom: 32),
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [Color(0xFF0F766E), Color(0xFF149B9B), Color(0xFF0D8383)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                  ),
                   child: Row(
                     children: [
                       IconButton(
-                        icon: const Icon(Icons.arrow_back_rounded, color: Colors.white, size: 22),
+                        icon: const Icon(Icons.arrow_back_rounded, color: Colors.white, size: 24),
                         onPressed: () => Navigator.pop(context),
                       ),
                       Stack(
                         children: [
                           CircleAvatar(
-                            radius: 19,
+                            radius: 20,
                             backgroundColor: Colors.white24,
                             child: Text(
                               otherUserName.substring(0, 1),
                               style: const TextStyle(
                                 color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 17,
+                                fontWeight: FontWeight.w900,
+                                fontSize: 18,
                               ),
                             ),
                           ),
-                          Positioned(
-                            right: 0,
-                            bottom: 0,
-                            child: Container(
-                              width: 11,
-                              height: 11,
-                              decoration: BoxDecoration(
-                                color: isOtherUserOnline ? const Color(0xFF00E676) : Colors.grey.shade400,
-                                shape: BoxShape.circle,
-                                border: Border.all(color: Colors.white, width: 2),
+                          if (isOtherUserOnline)
+                            Positioned(
+                              right: 0,
+                              bottom: 0,
+                              child: Container(
+                                width: 11,
+                                height: 11,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF00E676),
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: Colors.white, width: 2),
+                                ),
                               ),
                             ),
-                          ),
                         ],
                       ),
-                      const SizedBox(width: 10),
+                      const SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
@@ -1588,609 +1591,660 @@ class _ChatScreenState extends State<ChatScreen> {
                                 Text(
                                   otherUserName,
                                   style: const TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w900,
                                     color: Colors.white,
+                                    letterSpacing: 0.2,
                                   ),
                                 ),
-                                if (unreadCount > 0) ...[
-                                  const SizedBox(width: 8),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF25D366),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: Text(
-                                      '$unreadCount',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ),
-                                ],
+                                const SizedBox(width: 4),
+                                const Icon(Icons.verified_rounded, color: Colors.white70, size: 16),
                               ],
                             ),
-                            const SizedBox(height: 1),
                             Text(
                               isOtherUserTyping
                                   ? typingText
-                                  : (otherUserLastSeenText ?? (isOtherUserOnline ? '🟢 Online' : '⚫ Offline')),
+                                  : (isOtherUserOnline ? 'online' : (otherUserLastSeenText ?? 'offline')),
                               style: TextStyle(
-                                fontSize: 11,
+                                fontSize: 12,
                                 color: isOtherUserTyping
                                     ? const Color(0xFFFFE082)
-                                    : (isOtherUserOnline
-                                        ? const Color(0xFFA7FFEB)
-                                        : Colors.white70),
-                                fontWeight: isOtherUserTyping || isOtherUserOnline
-                                    ? FontWeight.w600
-                                    : FontWeight.normal,
+                                    : (isOtherUserOnline ? const Color(0xFFA7FFEB) : Colors.white70),
+                                fontWeight: FontWeight.w700,
                               ),
                             ),
                           ],
                         ),
                       ),
-                      const SizedBox(width: 16),
+                      IconButton(
+                        icon: Icon(
+                          isDark ? Icons.light_mode_rounded : Icons.dark_mode_outlined,
+                          color: Colors.white,
+                          size: 22,
+                        ),
+                        tooltip: 'Toggle Theme',
+                        onPressed: () {
+                          themeModeNotifier.value = isDark ? ThemeMode.light : ThemeMode.dark;
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.more_horiz_rounded, color: Colors.white, size: 26),
+                        onPressed: () {},
+                      ),
                     ],
                   ),
                 ),
               ),
-      ),
 
-      body: Column(
-        children: [
-          Expanded(
-            child: isLoading
-                ? const Center(
-                    child: CircularProgressIndicator(color: Color(0xFF128C7E)),
-                  )
-                : ListView.builder(
-                    controller: scrollController,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                    itemCount: messages.length,
-                    itemBuilder: (context, index) {
-                      final message = messages[index];
-                      final bool isMe = message['isMe'] as bool;
-                      final bool isDeleted = message['isDeleted'] == true || message['is_deleted'] == true;
-                      final bool isEdited = message['isEdited'] == true || message['is_edited'] == true;
-                      final bool isUploading = message['isUploading'] == true;
-                      final bool isLocalFile = message['isLocalFile'] == true;
-
-                      final isSelected = selectedMessage != null && selectedMessage!['id'] == message['id'];
-
-                      final String? rawImgUrl = message['attachmentUrl']?.toString();
-                      final String? formattedImgUrl = isLocalFile ? rawImgUrl : _getFormattedImageUrl(rawImgUrl);
-
-                      final Map reactions = message['reactions'] is Map ? message['reactions'] : {};
-
-                      return GestureDetector(
-                        onLongPress: () {
-                          if (!isDeleted) {
-                            setState(() {
-                              selectedMessage = message;
-                            });
-                          }
-                        },
-                        onTap: () {
-                          if (selectedMessage != null) {
-                            setState(() {
-                              selectedMessage = isSelected ? null : message;
-                            });
-                          }
-                        },
-                        child: Column(
-                          crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                          children: [
-
-                            // WHATSAPP FLOATING QUICK REACTION PILL
-                            if (isSelected && !isDeleted) ...[
-                              Container(
-                                margin: const EdgeInsets.only(bottom: 6),
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: Colors.white,
-                                  borderRadius: BorderRadius.circular(24),
-                                  boxShadow: const [
-                                    BoxShadow(
-                                      color: Color(0x20000000),
-                                      blurRadius: 8,
-                                      offset: Offset(0, 3),
-                                    ),
-                                  ],
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: ['❤️', '👍', '😂', '😮', '😢', '🙏'].map((emoji) {
-                                    return GestureDetector(
-                                      onTap: () => _toggleReaction(message['id'], emoji),
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(horizontal: 5),
-                                        child: Text(emoji, style: const TextStyle(fontSize: 21)),
-                                      ),
-                                    );
-                                  }).toList(),
-                                ),
+            // Message List
+            Expanded(
+              child: isLoading
+                  ? const Center(
+                      child: CircularProgressIndicator(color: AppTheme.primaryTeal),
+                    )
+                  : Column(
+                      children: [
+                        // Centered Today Pill
+                        Container(
+                          margin: const EdgeInsets.only(top: 8, bottom: 4),
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: isDark ? const Color(0xFF1F2C33) : Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.05),
+                                blurRadius: 4,
+                                offset: const Offset(0, 2),
                               ),
                             ],
+                          ),
+                          child: Text(
+                            'Today',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w800,
+                              color: isDark ? Colors.grey.shade300 : const Color(0xFF111B21),
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: ListView.builder(
+                            controller: scrollController,
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                            itemCount: messages.length,
+                            itemBuilder: (context, index) {
+                              final message = messages[index];
+                              final bool isMe = message['isMe'] as bool;
+                              final bool isDeleted = message['isDeleted'] == true || message['is_deleted'] == true;
+                              final bool isEdited = message['isEdited'] == true || message['is_edited'] == true;
+                              final bool isUploading = message['isUploading'] == true;
+                              final bool isLocalFile = message['isLocalFile'] == true;
 
-                            Align(
-                              alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-                              child: Container(
-                                constraints: const BoxConstraints(maxWidth: 290),
-                                margin: const EdgeInsets.only(bottom: 8),
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: isSelected
-                                      ? (isMe ? const Color(0xFFC2F3AE) : const Color(0xFFE2E8F0))
-                                      : (isMe ? const Color(0xFFE7FFDB) : Colors.white), // WhatsApp Light Green Sender / White Recipient
-                                  border: isSelected
-                                      ? Border.all(color: const Color(0xFF128C7E), width: 1.8)
-                                      : null,
-                                  borderRadius: BorderRadius.only(
-                                    topLeft: const Radius.circular(14),
-                                    topRight: const Radius.circular(14),
-                                    bottomLeft: Radius.circular(isMe ? 14 : 2),
-                                    bottomRight: Radius.circular(isMe ? 2 : 14),
-                                  ),
-                                  boxShadow: const [
-                                    BoxShadow(
-                                      color: Color(0x0F000000),
-                                      blurRadius: 3,
-                                      offset: Offset(0, 1),
-                                    ),
-                                  ],
-                                ),
+                              final isSelected = selectedMessage != null && selectedMessage!['id'] == message['id'];
+
+                              final String? rawImgUrl = message['attachmentUrl']?.toString();
+                              final String? formattedImgUrl = isLocalFile ? rawImgUrl : _getFormattedImageUrl(rawImgUrl);
+
+                              final Map reactions = message['reactions'] is Map ? message['reactions'] : {};
+
+                              return GestureDetector(
+                                onLongPress: () {
+                                  if (!isDeleted) {
+                                    setState(() {
+                                      selectedMessage = message;
+                                    });
+                                  }
+                                },
+                                onTap: () {
+                                  if (selectedMessage != null) {
+                                    setState(() {
+                                      selectedMessage = isSelected ? null : message;
+                                    });
+                                  }
+                                },
                                 child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
                                   children: [
-
-                                    // QUOTED REPLY PREVIEW BOX
-                                    if (message['replyToMessageId'] != null) ...[
-                                      GestureDetector(
-                                        onTap: () => _scrollToMessage(message['replyToMessageId']),
-                                        child: Container(
-                                          width: double.infinity,
-                                          margin: const EdgeInsets.only(bottom: 6),
-                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                                          decoration: BoxDecoration(
-                                            color: isMe ? const Color(0xFFD6F3C5) : const Color(0xFFF5F6F8),
-                                            borderRadius: BorderRadius.circular(8),
-                                            border: const Border(
-                                              left: BorderSide(
-                                                color: Color(0xFF06CF9C),
-                                                width: 3.5,
-                                              ),
+                                    // Quick Reaction Bar
+                                    if (isSelected && !isDeleted) ...[
+                                      Container(
+                                        margin: const EdgeInsets.only(bottom: 6),
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          color: isDark ? const Color(0xFF1F2C33) : Colors.white,
+                                          borderRadius: BorderRadius.circular(24),
+                                          boxShadow: const [
+                                            BoxShadow(
+                                              color: Color(0x20000000),
+                                              blurRadius: 8,
+                                              offset: Offset(0, 3),
                                             ),
-                                          ),
-                                          child: Column(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                _getReplySenderName(
-                                                  message['replySenderId'] ?? message['reply_sender_id'],
-                                                  message['replySenderName'] ?? message['reply_sender_name'],
-                                                  message['replySenderId'] != null &&
-                                                      int.tryParse(message['replySenderId'].toString()) == widget.currentUserId,
-                                                ),
-                                                style: const TextStyle(
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 11.5,
-                                                  color: Color(0xFF06CF9C),
-                                                ),
+                                          ],
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: ['❤️', '👍', '😂', '😮', '😢', '🙏'].map((emoji) {
+                                            return GestureDetector(
+                                              onTap: () => _toggleReaction(message['id'], emoji),
+                                              child: Padding(
+                                                padding: const EdgeInsets.symmetric(horizontal: 5),
+                                                child: Text(emoji, style: const TextStyle(fontSize: 21)),
                                               ),
-                                              const SizedBox(height: 2),
-                                              Text(
-                                                _getReplyPreviewText(
-                                                  message['replyAttachmentType'] ?? message['reply_attachment_type'],
-                                                  message['replyAttachmentName'] ?? message['reply_attachment_name'],
-                                                  message['replyMessage'] ?? message['reply_message'],
-                                                  message['replyIsDeleted'] == true || message['reply_is_deleted'] == true,
-                                                ),
-                                                maxLines: 2,
-                                                overflow: TextOverflow.ellipsis,
-                                                style: TextStyle(
-                                                  fontSize: 11.5,
-                                                  fontStyle: (message['replyIsDeleted'] == true || message['reply_is_deleted'] == true)
-                                                      ? FontStyle.italic
-                                                      : FontStyle.normal,
-                                                  color: const Color(0xFF54656F),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
+                                            );
+                                          }).toList(),
                                         ),
                                       ),
                                     ],
 
-                                    // ATTACHMENT OR TEXT
-                                    if (!isDeleted && formattedImgUrl != null && message['attachmentType'] == 'image') ...[
-                                      GestureDetector(
-                                        onTap: () => _openFullImageViewer(formattedImgUrl, isLocalFile: isLocalFile),
-                                        child: ClipRRect(
-                                          borderRadius: BorderRadius.circular(10),
-                                          child: Stack(
-                                            alignment: Alignment.center,
-                                            children: [
-                                              (isLocalFile && !kIsWeb)
-                                                  ? Image.file(
-                                                      File(formattedImgUrl),
-                                                      width: double.infinity,
-                                                      height: 190,
-                                                      fit: BoxFit.cover,
-                                                    )
-                                                  : Image.network(
-                                                      formattedImgUrl,
-                                                      width: double.infinity,
-                                                      height: 190,
-                                                      fit: BoxFit.cover,
-                                                      errorBuilder: (_, _, _) => Container(
-                                                        height: 130,
-                                                        color: Colors.grey.shade200,
-                                                        child: const Column(
-                                                          mainAxisAlignment: MainAxisAlignment.center,
+                                    Align(
+                                      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+                                      child: Container(
+                                        constraints: const BoxConstraints(maxWidth: 280),
+                                        margin: const EdgeInsets.only(bottom: 10),
+                                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                        decoration: BoxDecoration(
+                                          color: isMe
+                                              ? AppTheme.primaryTeal
+                                              : (isDark ? const Color(0xFF1F2C33) : const Color(0xFFD2F1EC)),
+                                          border: isSelected
+                                              ? Border.all(color: Colors.amber, width: 2)
+                                              : null,
+                                          borderRadius: BorderRadius.only(
+                                            topLeft: const Radius.circular(18),
+                                            topRight: const Radius.circular(18),
+                                            bottomLeft: Radius.circular(isMe ? 18 : 4),
+                                            bottomRight: Radius.circular(isMe ? 4 : 18),
+                                          ),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black.withValues(alpha: 0.06),
+                                              blurRadius: 4,
+                                              offset: const Offset(0, 2),
+                                            ),
+                                          ],
+                                        ),
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            // Quoted Reply Preview Box
+                                            if (message['replyToMessageId'] != null) ...[
+                                              GestureDetector(
+                                                onTap: () => _scrollToMessage(message['replyToMessageId']),
+                                                child: Container(
+                                                  width: double.infinity,
+                                                  margin: const EdgeInsets.only(bottom: 6),
+                                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                                                  decoration: BoxDecoration(
+                                                    color: isMe
+                                                        ? Colors.black.withValues(alpha: 0.15)
+                                                        : (isDark ? Colors.black26 : Colors.white54),
+                                                    borderRadius: BorderRadius.circular(8),
+                                                    border: Border(
+                                                      left: BorderSide(
+                                                        color: isMe ? Colors.white : AppTheme.primaryTeal,
+                                                        width: 3.5,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  child: Column(
+                                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                                    children: [
+                                                      Text(
+                                                        _getReplySenderName(
+                                                          message['replySenderId'] ?? message['reply_sender_id'],
+                                                          message['replySenderName'] ?? message['reply_sender_name'],
+                                                          message['replySenderId'] != null &&
+                                                              int.tryParse(message['replySenderId'].toString()) == widget.currentUserId,
+                                                        ),
+                                                        style: TextStyle(
+                                                          fontWeight: FontWeight.w900,
+                                                          fontSize: 11.5,
+                                                          color: isMe ? Colors.white : AppTheme.primaryTeal,
+                                                        ),
+                                                      ),
+                                                      const SizedBox(height: 2),
+                                                      Text(
+                                                        _getReplyPreviewText(
+                                                          message['replyAttachmentType'] ?? message['reply_attachment_type'],
+                                                          message['replyAttachmentName'] ?? message['reply_attachment_name'],
+                                                          message['replyMessage'] ?? message['reply_message'],
+                                                          message['replyIsDeleted'] == true || message['reply_is_deleted'] == true,
+                                                        ),
+                                                        maxLines: 2,
+                                                        overflow: TextOverflow.ellipsis,
+                                                        style: TextStyle(
+                                                          fontSize: 11.5,
+                                                          fontWeight: FontWeight.w700,
+                                                          color: isMe ? Colors.white70 : (isDark ? Colors.grey.shade300 : const Color(0xFF54656F)),
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+
+                                            // Attachment / Text
+                                            if (!isDeleted && formattedImgUrl != null && message['attachmentType'] == 'image') ...[
+                                              GestureDetector(
+                                                onTap: () => _openFullImageViewer(formattedImgUrl, isLocalFile: isLocalFile),
+                                                child: ClipRRect(
+                                                  borderRadius: BorderRadius.circular(12),
+                                                  child: Stack(
+                                                    alignment: Alignment.center,
+                                                    children: [
+                                                      (isLocalFile && !kIsWeb)
+                                                          ? Image.file(
+                                                              File(formattedImgUrl),
+                                                              width: double.infinity,
+                                                              height: 190,
+                                                              fit: BoxFit.cover,
+                                                            )
+                                                          : Image.network(
+                                                              formattedImgUrl,
+                                                              width: double.infinity,
+                                                              height: 190,
+                                                              fit: BoxFit.cover,
+                                                              errorBuilder: (_, _, _) => Container(
+                                                                height: 130,
+                                                                color: Colors.grey.shade200,
+                                                                child: const Column(
+                                                                  mainAxisAlignment: MainAxisAlignment.center,
+                                                                  children: [
+                                                                    Icon(Icons.broken_image_rounded, size: 36, color: Colors.grey),
+                                                                    SizedBox(height: 4),
+                                                                    Text("Could not load image", style: TextStyle(fontSize: 11, color: Colors.grey)),
+                                                                  ],
+                                                                ),
+                                                              ),
+                                                            ),
+                                                      if (isUploading)
+                                                        Container(
+                                                          color: Colors.black38,
+                                                          child: const Center(
+                                                            child: CircularProgressIndicator(color: Colors.white),
+                                                          ),
+                                                        ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ),
+                                              if (message['message'].toString().isNotEmpty)
+                                                Padding(
+                                                  padding: const EdgeInsets.only(top: 6),
+                                                  child: SelectableText(
+                                                    message['message'].toString(),
+                                                    style: TextStyle(
+                                                      color: isMe ? Colors.white : (isDark ? Colors.white : const Color(0xFF111B21)),
+                                                      fontSize: 15,
+                                                      fontWeight: FontWeight.w800,
+                                                    ),
+                                                  ),
+                                                ),
+                                            ] else if (!isDeleted && message['attachmentUrl'] != null && message['attachmentType'] == 'file') ...[
+                                              InkWell(
+                                                onTap: () {
+                                                  final url = message['attachmentUrl'].toString();
+                                                  OpenFilex.open(url);
+                                                },
+                                                child: Container(
+                                                  padding: const EdgeInsets.all(8),
+                                                  decoration: BoxDecoration(
+                                                    color: isMe ? Colors.black.withValues(alpha: 0.15) : Colors.white54,
+                                                    borderRadius: BorderRadius.circular(10),
+                                                  ),
+                                                  child: Row(
+                                                    children: [
+                                                      Icon(
+                                                        Icons.insert_drive_file_rounded,
+                                                        color: isMe ? Colors.white : AppTheme.primaryTeal,
+                                                        size: 26,
+                                                      ),
+                                                      const SizedBox(width: 8),
+                                                      Expanded(
+                                                        child: Column(
+                                                          crossAxisAlignment: CrossAxisAlignment.start,
                                                           children: [
-                                                            Icon(Icons.broken_image_rounded, size: 36, color: Colors.grey),
-                                                            SizedBox(height: 4),
-                                                            Text("Could not load image", style: TextStyle(fontSize: 11, color: Colors.grey)),
+                                                            Text(
+                                                              message['attachmentName'] ?? 'Attachment File',
+                                                              maxLines: 1,
+                                                              overflow: TextOverflow.ellipsis,
+                                                              style: TextStyle(
+                                                                color: isMe ? Colors.white : (isDark ? Colors.white : const Color(0xFF111B21)),
+                                                                fontWeight: FontWeight.w900,
+                                                                fontSize: 13.5,
+                                                              ),
+                                                            ),
+                                                            if (message['attachmentSize'] != null)
+                                                              Text(
+                                                                _formatFileSize(message['attachmentSize']),
+                                                                style: TextStyle(
+                                                                  color: isMe ? Colors.white70 : Colors.grey.shade600,
+                                                                  fontSize: 11,
+                                                                  fontWeight: FontWeight.w700,
+                                                                ),
+                                                              ),
                                                           ],
                                                         ),
                                                       ),
-                                                    ),
-                                              if (isUploading)
-                                                Container(
-                                                  color: Colors.black38,
-                                                  child: const Center(
-                                                    child: CircularProgressIndicator(color: Colors.white),
+                                                    ],
                                                   ),
                                                 ),
-                                            ],
-                                          ),
-                                        ),
-                                      ),
-                                      if (message['message'].toString().isNotEmpty)
-                                        Padding(
-                                          padding: const EdgeInsets.only(top: 6),
-                                          child: SelectableText(
-                                            message['message'].toString(),
-                                            style: const TextStyle(
-                                              color: Color(0xFF111B21),
-                                              fontSize: 14.5,
-                                            ),
-                                          ),
-                                        ),
-                                    ] else if (!isDeleted && message['attachmentUrl'] != null && message['attachmentType'] == 'file') ...[
-                                      InkWell(
-                                        onTap: () {
-                                          final url = message['attachmentUrl'].toString();
-                                          OpenFilex.open(url);
-                                        },
-                                        child: Container(
-                                          padding: const EdgeInsets.all(8),
-                                          decoration: BoxDecoration(
-                                            color: isMe ? const Color(0xFFD6F3C5) : const Color(0xFFF5F6F8),
-                                            borderRadius: BorderRadius.circular(10),
-                                          ),
-                                          child: Row(
-                                            children: [
-                                              const Icon(
-                                                Icons.insert_drive_file_rounded,
-                                                color: Color(0xFF128C7E),
-                                                size: 26,
                                               ),
-                                              const SizedBox(width: 8),
-                                              Expanded(
-                                                child: Column(
-                                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                                  children: [
-                                                    Text(
-                                                      message['attachmentName'] ?? 'Attachment File',
-                                                      maxLines: 1,
-                                                      overflow: TextOverflow.ellipsis,
-                                                      style: const TextStyle(
-                                                        color: Color(0xFF111B21),
-                                                        fontWeight: FontWeight.bold,
-                                                        fontSize: 13,
-                                                      ),
-                                                    ),
-                                                    if (message['attachmentSize'] != null)
-                                                      Text(
-                                                        _formatFileSize(message['attachmentSize']),
-                                                        style: const TextStyle(
-                                                          color: Color(0xFF667781),
-                                                          fontSize: 11,
-                                                        ),
-                                                      ),
-                                                  ],
+                                            ] else ...[
+                                              SelectableText(
+                                                isDeleted ? 'This message was deleted' : message['message'].toString(),
+                                                style: TextStyle(
+                                                  color: isMe
+                                                      ? Colors.white
+                                                      : (isDeleted
+                                                          ? Colors.grey.shade500
+                                                          : (isDark ? Colors.white : const Color(0xFF111B21))),
+                                                  fontSize: 15,
+                                                  height: 1.25,
+                                                  fontWeight: isDeleted ? FontWeight.w500 : FontWeight.w800,
+                                                  fontStyle: isDeleted ? FontStyle.italic : FontStyle.normal,
                                                 ),
                                               ),
                                             ],
-                                          ),
-                                        ),
-                                      ),
-                                    ] else ...[
-                                      SelectableText(
-                                        isDeleted ? 'This message was deleted' : message['message'].toString(),
-                                        style: TextStyle(
-                                          color: isDeleted ? const Color(0xFF667781) : const Color(0xFF111B21),
-                                          fontSize: 14.5,
-                                          height: 1.25,
-                                          fontStyle: isDeleted ? FontStyle.italic : FontStyle.normal,
-                                        ),
-                                      ),
-                                    ],
 
-                                    const SizedBox(height: 4),
+                                            const SizedBox(height: 4),
 
-                                    // TIME, REACTION BADGES & BLUE TICKS
-                                    Row(
-                                      mainAxisAlignment: MainAxisAlignment.end,
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        if (reactions.isNotEmpty) ...[
-                                          Container(
-                                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                                            decoration: BoxDecoration(
-                                              color: Colors.white,
-                                              borderRadius: BorderRadius.circular(10),
-                                              boxShadow: const [
-                                                BoxShadow(color: Color(0x15000000), blurRadius: 3),
+                                            // Time & Blue Ticks
+                                            Row(
+                                              mainAxisAlignment: MainAxisAlignment.end,
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                if (reactions.isNotEmpty) ...[
+                                                  Container(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                                    decoration: BoxDecoration(
+                                                      color: Colors.white,
+                                                      borderRadius: BorderRadius.circular(10),
+                                                      boxShadow: const [
+                                                        BoxShadow(color: Color(0x15000000), blurRadius: 3),
+                                                      ],
+                                                    ),
+                                                    child: Text(
+                                                      reactions.values.toSet().join(' '),
+                                                      style: const TextStyle(fontSize: 11),
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 5),
+                                                ],
+                                                if (isEdited && !isDeleted) ...[
+                                                  Text(
+                                                    'Edited • ',
+                                                    style: TextStyle(
+                                                      color: isMe ? Colors.white70 : Colors.grey.shade600,
+                                                      fontSize: 10,
+                                                      fontWeight: FontWeight.w700,
+                                                      fontStyle: FontStyle.italic,
+                                                    ),
+                                                  ),
+                                                ],
+                                                Text(
+                                                  message['time'].toString(),
+                                                  style: TextStyle(
+                                                    color: isMe ? Colors.white70 : (isDark ? Colors.grey.shade400 : Colors.grey.shade600),
+                                                    fontSize: 11,
+                                                    fontWeight: FontWeight.w700,
+                                                  ),
+                                                ),
+                                                if (isMe && !isDeleted) ...[
+                                                  const SizedBox(width: 3),
+                                                  Builder(
+                                                    builder: (context) {
+                                                      final bool isSeen = message['isRead'] == true || message['is_read'] == true;
+                                                      final bool isDelivered = isSeen || message['isDelivered'] == true || message['is_delivered'] == true;
+
+                                                      IconData iconData;
+                                                      Color iconColor;
+
+                                                      if (isSeen) {
+                                                        iconData = Icons.done_all_rounded;
+                                                        iconColor = const Color(0xFF80DEEA); // Bright Cyan
+                                                      } else if (isDelivered) {
+                                                        iconData = Icons.done_all_rounded;
+                                                        iconColor = Colors.white70;
+                                                      } else {
+                                                        iconData = Icons.check_rounded;
+                                                        iconColor = Colors.white70;
+                                                      }
+
+                                                      return Icon(
+                                                        iconData,
+                                                        size: 16,
+                                                        color: iconColor,
+                                                      );
+                                                    },
+                                                  ),
+                                                ],
                                               ],
                                             ),
-                                            child: Text(
-                                              reactions.values.toSet().join(' '),
-                                              style: const TextStyle(fontSize: 11),
-                                            ),
-                                          ),
-                                          const SizedBox(width: 5),
-                                        ],
-                                        if (isEdited && !isDeleted) ...[
-                                          const Text(
-                                            'Edited • ',
-                                            style: TextStyle(
-                                              color: Color(0xFF667781),
-                                              fontSize: 10,
-                                              fontStyle: FontStyle.italic,
-                                            ),
-                                          ),
-                                        ],
-                                        Text(
-                                          message['time'].toString(),
-                                          style: const TextStyle(
-                                            color: Color(0xFF667781),
-                                            fontSize: 10,
-                                          ),
+                                          ],
                                         ),
-                                        if (isMe && !isDeleted) ...[
-                                          const SizedBox(width: 3),
-                                          Builder(
-                                            builder: (context) {
-                                              final bool isSeen = message['isRead'] == true || message['is_read'] == true;
-                                              final bool isDelivered = isSeen || message['isDelivered'] == true || message['is_delivered'] == true;
-
-                                              IconData iconData;
-                                              Color iconColor;
-
-                                              if (isSeen) {
-                                                iconData = Icons.done_all_rounded;
-                                                iconColor = const Color(0xFF53BDEB); // WhatsApp Bright Cyan Tick
-                                              } else if (isDelivered) {
-                                                iconData = Icons.done_all_rounded;
-                                                iconColor = const Color(0xFF667781);
-                                              } else {
-                                                iconData = Icons.check_rounded;
-                                                iconColor = const Color(0xFF667781);
-                                              }
-
-                                              return Icon(
-                                                iconData,
-                                                size: 15,
-                                                color: iconColor,
-                                              );
-                                            },
-                                          ),
-                                        ],
-                                      ],
+                                      ),
                                     ),
                                   ],
                                 ),
-                              ),
-                            ),
-                          ],
+                              );
+                            },
+                          ),
                         ),
-                      );
-                    },
-                  ),
-          ),
-
-          if (isOtherUserTyping)
-            Padding(
-              padding: const EdgeInsets.only(left: 16, right: 16, bottom: 6),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: const [
-                      BoxShadow(color: Color(0x10000000), blurRadius: 3),
-                    ],
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const SizedBox(
-                        width: 10,
-                        height: 10,
-                        child: CircularProgressIndicator(strokeWidth: 1.8, color: Color(0xFF128C7E)),
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        typingText,
-                        style: const TextStyle(
-                          fontSize: 11.5,
-                          fontStyle: FontStyle.italic,
-                          color: Color(0xFF128C7E),
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+                      ],
+                    ),
             ),
 
-          if (replyingToMessage != null)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              color: const Color(0xFFE9EDEF),
-              child: Row(
-                children: [
-                  const Icon(Icons.reply_rounded, color: Color(0xFF128C7E), size: 18),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+            if (isOtherUserTyping)
+              Padding(
+                padding: const EdgeInsets.only(left: 16, right: 16, bottom: 6),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: isDark ? const Color(0xFF1F2C33) : Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          "Replying to ${_getReplySenderName(
-                            replyingToMessage!['sender_id'] ?? replyingToMessage!['senderId'],
-                            replyingToMessage!['sender_name'] ?? replyingToMessage!['senderName'],
-                            replyingToMessage!['isMe'] == true,
-                          )}",
-                          style: const TextStyle(
-                            color: Color(0xFF128C7E),
-                            fontWeight: FontWeight.bold,
-                            fontSize: 11.5,
-                          ),
+                        const SizedBox(
+                          width: 10,
+                          height: 10,
+                          child: CircularProgressIndicator(strokeWidth: 1.8, color: AppTheme.primaryTeal),
                         ),
+                        const SizedBox(width: 6),
                         Text(
-                          _getReplyPreviewText(
-                            replyingToMessage!['attachmentType'] ?? replyingToMessage!['attachment_type'],
-                            replyingToMessage!['attachmentName'] ?? replyingToMessage!['attachment_name'],
-                            replyingToMessage!['message'],
-                            replyingToMessage!['isDeleted'] == true || replyingToMessage!['is_deleted'] == true,
+                          typingText,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontStyle: FontStyle.italic,
+                            color: AppTheme.primaryTeal,
+                            fontWeight: FontWeight.w700,
                           ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 11.5, color: Color(0xFF111B21)),
                         ),
                       ],
                     ),
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.close_rounded, size: 18, color: Color(0xFF54656F)),
-                    onPressed: _cancelReplying,
-                  ),
-                ],
+                ),
               ),
-            ),
 
-          if (editingMessageId != null)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              color: const Color(0xFFE9EDEF),
-              child: Row(
-                children: [
-                  const Icon(Icons.edit_rounded, color: Color(0xFF128C7E), size: 18),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text(
-                      'Editing message...',
-                      style: TextStyle(
-                        color: Color(0xFF128C7E),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close_rounded, size: 18, color: Color(0xFF54656F)),
-                    onPressed: _cancelEditing,
-                  ),
-                ],
-              ),
-            ),
-
-          // WHATSAPP-STYLE INPUT BAR WITH QUICK CAMERA BUTTON
-          SafeArea(
-            top: false,
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(6, 6, 6, 8),
-              color: const Color(0xFFF0F2F5),
-              child: Row(
-                children: [
-                  IconButton(
-                    onPressed: _showAttachmentGridSheet,
-                    icon: const Icon(
-                      Icons.attach_file_rounded,
-                      color: Color(0xFF54656F),
-                      size: 24,
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: _pickFromCamera,
-                    icon: const Icon(
-                      Icons.camera_alt_rounded,
-                      color: Color(0xFF54656F),
-                      size: 24,
-                    ),
-                  ),
-                  Expanded(
-                    child: TextField(
-                      controller: messageController,
-                      textInputAction: TextInputAction.send,
-                      onChanged: _onTypingChanged,
-                      onSubmitted: (_) => sendMessage(),
-                      style: const TextStyle(color: Color(0xFF111B21), fontSize: 15),
-                      decoration: InputDecoration(
-                        hintText: 'Message',
-                        hintStyle: const TextStyle(color: Color(0xFF8696A0)),
-                        filled: true,
-                        fillColor: Colors.white,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 10,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  GestureDetector(
-                    onTap: sendMessage,
-                    child: Container(
-                      width: 44,
-                      height: 44,
-                      decoration: const BoxDecoration(
-                        color: Color(0xFF128C7E),
-                        shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: Color(0x22000000),
-                            blurRadius: 4,
-                            offset: Offset(0, 2),
+            if (replyingToMessage != null)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                color: isDark ? const Color(0xFF1F2C33) : const Color(0xFFE9EDEF),
+                child: Row(
+                  children: [
+                    const Icon(Icons.reply_rounded, color: AppTheme.primaryTeal, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            "Replying to ${_getReplySenderName(
+                              replyingToMessage!['sender_id'] ?? replyingToMessage!['senderId'],
+                              replyingToMessage!['sender_name'] ?? replyingToMessage!['senderName'],
+                              replyingToMessage!['isMe'] == true,
+                            )}",
+                            style: const TextStyle(
+                              color: AppTheme.primaryTeal,
+                              fontWeight: FontWeight.w900,
+                              fontSize: 12,
+                            ),
+                          ),
+                          Text(
+                            _getReplyPreviewText(
+                              replyingToMessage!['attachmentType'] ?? replyingToMessage!['attachment_type'],
+                              replyingToMessage!['attachmentName'] ?? replyingToMessage!['attachment_name'],
+                              replyingToMessage!['message'],
+                              replyingToMessage!['isDeleted'] == true || replyingToMessage!['is_deleted'] == true,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: isDark ? Colors.white : const Color(0xFF111B21),
+                            ),
                           ),
                         ],
                       ),
-                      child: const Icon(
-                        Icons.send_rounded,
-                        color: Colors.white,
-                        size: 20,
+                    ),
+                    IconButton(
+                      icon: Icon(Icons.close_rounded, size: 18, color: isDark ? Colors.white70 : const Color(0xFF54656F)),
+                      onPressed: _cancelReplying,
+                    ),
+                  ],
+                ),
+              ),
+
+            if (editingMessageId != null)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                color: isDark ? const Color(0xFF1F2C33) : const Color(0xFFE9EDEF),
+                child: Row(
+                  children: [
+                    const Icon(Icons.edit_rounded, color: AppTheme.primaryTeal, size: 18),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        'Editing message...',
+                        style: TextStyle(
+                          color: AppTheme.primaryTeal,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 12,
+                        ),
                       ),
                     ),
+                    IconButton(
+                      icon: Icon(Icons.close_rounded, size: 18, color: isDark ? Colors.white70 : const Color(0xFF54656F)),
+                      onPressed: _cancelEditing,
+                    ),
+                  ],
+                ),
+              ),
+
+            // Bottom Wave Footer & Input Pill Bar
+            ClipPath(
+              clipper: WaveFooterClipper(),
+              child: Container(
+                padding: const EdgeInsets.only(top: 28, left: 16, right: 16, bottom: 16),
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [Color(0xFF0F766E), Color(0xFF149B9B)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
                   ),
-                ],
+                ),
+                child: Container(
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: isDark ? const Color(0xFF1F2C33) : Colors.white,
+                    borderRadius: BorderRadius.circular(26),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.12),
+                        blurRadius: 8,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: TextField(
+                          controller: messageController,
+                          textInputAction: TextInputAction.send,
+                          onChanged: _onTypingChanged,
+                          onSubmitted: (_) => sendMessage(),
+                          style: TextStyle(
+                            color: isDark ? Colors.white : const Color(0xFF111B21),
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                          ),
+                          decoration: InputDecoration(
+                            hintText: 'Type your message here...',
+                            hintStyle: TextStyle(
+                              color: isDark ? Colors.grey.shade400 : Colors.grey.shade500,
+                              fontWeight: FontWeight.w700,
+                              fontSize: 14,
+                            ),
+                            filled: false,
+                            border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: _pickFromCamera,
+                        icon: Icon(
+                          Icons.camera_alt_rounded,
+                          color: isDark ? Colors.grey.shade300 : const Color(0xFF111B21),
+                          size: 22,
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: _showAttachmentGridSheet,
+                        icon: Icon(
+                          Icons.attach_file_rounded,
+                          color: isDark ? Colors.grey.shade300 : const Color(0xFF111B21),
+                          size: 22,
+                        ),
+                      ),
+                      const SizedBox(width: 2),
+                      GestureDetector(
+                        onTap: sendMessage,
+                        child: Container(
+                          width: 42,
+                          height: 42,
+                          margin: const EdgeInsets.only(right: 5),
+                          decoration: const BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [Color(0xFF0F766E), Color(0xFF149B9B)],
+                            ),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            Icons.near_me_rounded,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
