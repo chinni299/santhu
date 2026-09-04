@@ -76,7 +76,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   String? _getFormattedImageUrl(String? url) {
-    if (url == null || url.trim().isEmpty) return null;
+    if (url == null || url.trim().isEmpty || url.trim() == 'null') return null;
     String cleanUrl = url.trim();
     if (cleanUrl.startsWith('/')) {
       cleanUrl = '$baseUrl$cleanUrl';
@@ -1451,17 +1451,50 @@ class _ChatScreenState extends State<ChatScreen> {
           ? int.tryParse(replyingToMessage!['id'].toString())
           : null;
 
+      final String tempMsgId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
+
+      final optimisticMsg = {
+        'id': tempMsgId,
+        'message': text,
+        'attachmentUrl': null,
+        'attachmentType': null,
+        'attachmentName': null,
+        'attachmentSize': null,
+        'replyToMessageId': replyId,
+        'reply_to_message_id': replyId,
+        'replySenderId': replyingToMessage?['sender_id'] ?? replyingToMessage?['senderId'],
+        'replySenderName': replyingToMessage?['sender_name'] ?? replyingToMessage?['senderName'],
+        'replyMessage': replyingToMessage?['message'],
+        'replyAttachmentType': replyingToMessage?['attachmentType'] ?? replyingToMessage?['attachment_type'],
+        'replyAttachmentName': replyingToMessage?['attachmentName'] ?? replyingToMessage?['attachment_name'],
+        'replyIsDeleted': replyingToMessage?['isDeleted'] == true || replyingToMessage?['is_deleted'] == true,
+        'isMe': true,
+        'isDelivered': false,
+        'isRead': false,
+        'isEdited': false,
+        'isDeleted': false,
+        'reactions': {},
+        'time': _formatTime(DateTime.now().toIso8601String()),
+      };
+
+      setState(() {
+        messages.add(optimisticMsg);
+      });
+      _scrollToBottom();
+
       socket.emit('sendMessage', {
         'conversationId': widget.conversationId,
         'senderId': widget.currentUserId,
         'message': text,
         'replyToMessageId': replyId,
+        'tempMsgId': tempMsgId,
       });
     }
 
     _cancelReplying();
     messageController.clear();
   }
+
 
   @override
   Widget build(BuildContext context) {
