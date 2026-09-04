@@ -60,7 +60,18 @@ class _ChatScreenState extends State<ChatScreen> {
   // Reply Message State
   Map<String, dynamic>? replyingToMessage;
 
+  // 3-Dots Menu & Feature States
+  bool isMuted = false;
+  String muteDuration = 'Off';
+  String disappearingTimer = 'Off';
+  bool isFavourite = false;
+  String customList = 'None';
+  bool isSearchingInChat = false;
+  final inChatSearchController = TextEditingController();
+  String inChatSearchQuery = '';
+
   static const String baseUrl = 'http://192.168.0.120:5000';
+
 
   late io.Socket socket;
 
@@ -635,9 +646,597 @@ class _ChatScreenState extends State<ChatScreen> {
 
     messageController.dispose();
     scrollController.dispose();
+    inChatSearchController.dispose();
 
     super.dispose();
   }
+
+  // --- 3-DOTS MENU IMPLEMENTATIONS ---
+
+  void _showThreeDotsMenu() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final otherUserName = widget.currentUserId == 1 ? 'Leslie' : 'User 1';
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return Container(
+          margin: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF1E293B) : const Color(0xFF1F2C33),
+            borderRadius: BorderRadius.circular(24),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x40000000),
+                blurRadius: 16,
+                offset: Offset(0, 6),
+              ),
+            ],
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: 8),
+                Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(height: 8),
+
+                _buildMenuItem(
+                  icon: Icons.info_outline_rounded,
+                  title: 'Contact info',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showContactInfo();
+                  },
+                ),
+                _buildMenuItem(
+                  icon: Icons.search_rounded,
+                  title: 'Search',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _toggleInChatSearch();
+                  },
+                ),
+                _buildMenuItem(
+                  icon: Icons.check_box_outlined,
+                  title: 'Select messages',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _enableSelectMessages();
+                  },
+                ),
+                _buildMenuItem(
+                  icon: isMuted ? Icons.notifications_active_outlined : Icons.notifications_off_outlined,
+                  title: isMuted ? 'Mute notifications ($muteDuration)' : 'Mute notifications',
+                  hasTrailingArrow: true,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showMuteDialog();
+                  },
+                ),
+                _buildMenuItem(
+                  icon: Icons.timer_outlined,
+                  title: 'Disappearing messages ($disappearingTimer)',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showDisappearingMessagesDialog();
+                  },
+                ),
+                _buildMenuItem(
+                  icon: isFavourite ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+                  iconColor: isFavourite ? Colors.redAccent : Colors.white,
+                  title: isFavourite ? 'Remove from favourites' : 'Add to favourites',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _toggleFavourites();
+                  },
+                ),
+                _buildMenuItem(
+                  icon: Icons.photo_album_outlined,
+                  title: 'Add to list ($customList)',
+                  hasTrailingArrow: true,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showAddToListDialog();
+                  },
+                ),
+                _buildMenuItem(
+                  icon: Icons.file_download_outlined,
+                  title: 'Export chat',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _exportChatTranscript();
+                  },
+                ),
+                _buildMenuItem(
+                  icon: Icons.cancel_outlined,
+                  title: 'Close chat',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    Navigator.pop(context);
+                  },
+                ),
+
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  child: Divider(color: Colors.white12, height: 1),
+                ),
+
+                _buildMenuItem(
+                  icon: Icons.link_rounded,
+                  title: 'Send call link',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _sendCallLink();
+                  },
+                ),
+                _buildMenuItem(
+                  icon: Icons.calendar_month_rounded,
+                  title: 'Schedule call',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _scheduleCallPicker();
+                  },
+                ),
+                _buildMenuItem(
+                  icon: Icons.group_add_rounded,
+                  title: 'New group call with $otherUserName',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _startNewGroupCall();
+                  },
+                ),
+                const SizedBox(height: 12),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildMenuItem({
+    required IconData icon,
+    required String title,
+    Color iconColor = Colors.white,
+    bool hasTrailingArrow = false,
+    required VoidCallback onTap,
+  }) {
+    return ListTile(
+      dense: true,
+      horizontalTitleGap: 12,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 0),
+      leading: Icon(icon, color: iconColor, size: 22),
+      title: Text(
+        title,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 15,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      trailing: hasTrailingArrow
+          ? const Icon(Icons.arrow_right_rounded, color: Colors.white54, size: 20)
+          : null,
+      onTap: onTap,
+    );
+  }
+
+  void _showContactInfo() {
+    final otherUserName = widget.currentUserId == 1 ? 'Leslie' : 'User 1';
+    final mediaCount = messages.where((m) => m['attachmentType'] == 'image').length;
+    final fileCount = messages.where((m) => m['attachmentType'] == 'file').length;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final isDark = Theme.of(context).brightness == Brightness.dark;
+        return Container(
+          height: MediaQuery.of(context).size.height * 0.75,
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF121E24) : Colors.white,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
+          ),
+          child: Column(
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade400,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 20),
+              CircleAvatar(
+                radius: 44,
+                backgroundColor: AppTheme.primaryTeal,
+                child: Text(
+                  otherUserName[0],
+                  style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w900, color: Colors.white),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    otherUserName,
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w900,
+                      color: isDark ? Colors.white : const Color(0xFF111B21),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  const Icon(Icons.verified_rounded, color: AppTheme.primaryTeal, size: 20),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                isOtherUserOnline ? '🟢 Online' : '⚫ Offline',
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppTheme.primaryTeal),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _buildContactActionButton(Icons.phone_rounded, 'Audio Call', () {
+                    Navigator.pop(ctx);
+                    _sendCallLink();
+                  }),
+                  _buildContactActionButton(Icons.videocam_rounded, 'Video Call', () {
+                    Navigator.pop(ctx);
+                    _sendCallLink();
+                  }),
+                  _buildContactActionButton(
+                    isMuted ? Icons.notifications_active_rounded : Icons.notifications_off_rounded,
+                    isMuted ? 'Unmute' : 'Mute',
+                    () {
+                      Navigator.pop(ctx);
+                      _showMuteDialog();
+                    },
+                  ),
+                ],
+              ),
+              const Divider(height: 32),
+              ListTile(
+                leading: const Icon(Icons.perm_identity_rounded, color: AppTheme.primaryTeal),
+                title: const Text('Phone Number', style: TextStyle(fontWeight: FontWeight.w800)),
+                subtitle: const Text('+1 (555) 019-2834', style: TextStyle(fontWeight: FontWeight.w600)),
+              ),
+              ListTile(
+                leading: const Icon(Icons.perm_media_rounded, color: AppTheme.primaryTeal),
+                title: const Text('Media & Files', style: TextStyle(fontWeight: FontWeight.w800)),
+                subtitle: Text('$mediaCount Photos • $fileCount Documents', style: const TextStyle(fontWeight: FontWeight.w600)),
+              ),
+              ListTile(
+                leading: const Icon(Icons.lock_outline_rounded, color: AppTheme.primaryTeal),
+                title: const Text('Encryption', style: TextStyle(fontWeight: FontWeight.w800)),
+                subtitle: const Text('End-to-end encrypted', style: TextStyle(fontWeight: FontWeight.w600)),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildContactActionButton(IconData icon, String label, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: AppTheme.primaryTeal.withValues(alpha: 0.15),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: AppTheme.primaryTeal, size: 24),
+          ),
+          const SizedBox(height: 6),
+          Text(label, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  void _toggleInChatSearch() {
+    setState(() {
+      isSearchingInChat = !isSearchingInChat;
+      if (!isSearchingInChat) {
+        inChatSearchController.clear();
+        inChatSearchQuery = '';
+      }
+    });
+  }
+
+  void _enableSelectMessages() {
+    if (messages.isNotEmpty) {
+      setState(() {
+        selectedMessage = messages.last;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Message selection enabled. Tap or long-press messages to copy/delete.'),
+          backgroundColor: AppTheme.primaryTeal,
+        ),
+      );
+    }
+  }
+
+  void _showMuteDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Mute notifications', style: TextStyle(fontWeight: FontWeight.w900)),
+        children: [
+          SimpleDialogOption(
+            onPressed: () {
+              setState(() {
+                isMuted = true;
+                muteDuration = '8 Hours';
+              });
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Notifications muted for 8 Hours'), backgroundColor: AppTheme.primaryTeal),
+              );
+            },
+            child: const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('8 Hours', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () {
+              setState(() {
+                isMuted = true;
+                muteDuration = '1 Week';
+              });
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Notifications muted for 1 Week'), backgroundColor: AppTheme.primaryTeal),
+              );
+            },
+            child: const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('1 Week', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () {
+              setState(() {
+                isMuted = true;
+                muteDuration = 'Always';
+              });
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Notifications muted Always'), backgroundColor: AppTheme.primaryTeal),
+              );
+            },
+            child: const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('Always', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+            ),
+          ),
+          if (isMuted)
+            SimpleDialogOption(
+              onPressed: () {
+                setState(() {
+                  isMuted = false;
+                  muteDuration = 'Off';
+                });
+                Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Notifications unmuted'), backgroundColor: AppTheme.primaryTeal),
+                );
+              },
+              child: const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text('Unmute', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: Colors.redAccent)),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  void _showDisappearingMessagesDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Disappearing messages timer', style: TextStyle(fontWeight: FontWeight.w900)),
+        children: ['24 Hours', '7 Days', '90 Days', 'Off'].map((timer) {
+          return SimpleDialogOption(
+            onPressed: () {
+              setState(() {
+                disappearingTimer = timer;
+              });
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Disappearing messages set to $timer ⏱️'), backgroundColor: AppTheme.primaryTeal),
+              );
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                timer,
+                style: TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 16,
+                  color: disappearingTimer == timer ? AppTheme.primaryTeal : null,
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  void _toggleFavourites() {
+    setState(() {
+      isFavourite = !isFavourite;
+    });
+    final otherUserName = widget.currentUserId == 1 ? 'Leslie' : 'User 1';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(isFavourite ? 'Added $otherUserName to Favourites ❤️' : 'Removed $otherUserName from Favourites'),
+        backgroundColor: AppTheme.primaryTeal,
+      ),
+    );
+  }
+
+  void _showAddToListDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Add to list', style: TextStyle(fontWeight: FontWeight.w900)),
+        children: ['Close Friends', 'Work', 'Family', 'Favorites', 'None'].map((category) {
+          return SimpleDialogOption(
+            onPressed: () {
+              setState(() {
+                customList = category;
+              });
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Contact added to $category 🖼️'), backgroundColor: AppTheme.primaryTeal),
+              );
+            },
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(category, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16)),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  void _exportChatTranscript() {
+    final otherUserName = widget.currentUserId == 1 ? 'Leslie' : 'User 1';
+    final StringBuffer transcript = StringBuffer();
+    transcript.writeln("=== DuoChat History Export ===");
+    transcript.writeln("Participant: $otherUserName");
+    transcript.writeln("Export Date: ${DateTime.now()}\n");
+
+    for (var m in messages) {
+      final sender = m['isMe'] == true ? 'You' : otherUserName;
+      final text = m['message'] ?? '';
+      final time = m['time'] ?? '';
+      transcript.writeln("[$time] $sender: $text");
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Export Chat', style: TextStyle(fontWeight: FontWeight.w900)),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 250,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              transcript.toString(),
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: transcript.toString()));
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Chat transcript copied to clipboard! 📥'), backgroundColor: AppTheme.primaryTeal),
+              );
+            },
+            icon: const Icon(Icons.copy_rounded, size: 18),
+            label: const Text('Copy Transcript'),
+            style: ElevatedButton.styleFrom(backgroundColor: AppTheme.primaryTeal, foregroundColor: Colors.white),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _sendCallLink() {
+    final callRoomId = 'room_${DateTime.now().millisecondsSinceEpoch}';
+    final callLinkMsg = "🔗 Join my DuoCall: https://duochat.call/$callRoomId";
+
+    messageController.text = callLinkMsg;
+    sendMessage();
+  }
+
+  Future<void> _scheduleCallPicker() async {
+    final now = DateTime.now();
+    final pickedDate = await showDatePicker(
+      context: context,
+      initialDate: now.add(const Duration(hours: 1)),
+      firstDate: now,
+      lastDate: now.add(const Duration(days: 30)),
+    );
+
+    if (pickedDate == null || !mounted) return;
+
+    final pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.now(),
+    );
+
+    if (pickedTime == null || !mounted) return;
+
+    final scheduleText = "📅 Scheduled Duo Call for ${pickedDate.day}/${pickedDate.month}/${pickedDate.year} at ${pickedTime.format(context)}";
+    messageController.text = scheduleText;
+    sendMessage();
+  }
+
+  void _startNewGroupCall() {
+    final otherUserName = widget.currentUserId == 1 ? 'Leslie' : 'User 1';
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: const [
+            Icon(Icons.group_add_rounded, color: AppTheme.primaryTeal),
+            SizedBox(width: 8),
+            Text('New Group Call', style: TextStyle(fontWeight: FontWeight.w900)),
+          ],
+        ),
+        content: Text('Start an instant group call session with $otherUserName and participants?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _sendCallLink();
+            },
+            icon: const Icon(Icons.call_rounded),
+            label: const Text('Start Call'),
+            style: ElevatedButton.styleFrom(backgroundColor: AppTheme.primaryTeal, foregroundColor: Colors.white),
+          ),
+        ],
+      ),
+    );
+  }
+
 
   String _formatTime(String rawTime) {
     if (rawTime.isEmpty) return '';
@@ -1662,10 +2261,56 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                       IconButton(
                         icon: const Icon(Icons.more_horiz_rounded, color: Colors.white, size: 26),
-                        onPressed: () {},
+                        onPressed: _showThreeDotsMenu,
                       ),
                     ],
                   ),
+                ),
+              ),
+
+            // In-Chat Live Search Bar Overlay
+            if (isSearchingInChat)
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                decoration: BoxDecoration(
+                  color: isDark ? const Color(0xFF1F2C33) : Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: const [
+                    BoxShadow(color: Color(0x15000000), blurRadius: 6, offset: Offset(0, 2)),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.search_rounded, color: AppTheme.primaryTeal, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: inChatSearchController,
+                        autofocus: true,
+                        style: TextStyle(
+                          color: isDark ? Colors.white : const Color(0xFF111B21),
+                          fontWeight: FontWeight.w800,
+                          fontSize: 14,
+                        ),
+                        onChanged: (q) {
+                          setState(() {
+                            inChatSearchQuery = q.toLowerCase().trim();
+                          });
+                        },
+                        decoration: const InputDecoration(
+                          hintText: 'Search in conversation...',
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close_rounded, size: 20),
+                      onPressed: _toggleInChatSearch,
+                    ),
+                  ],
                 ),
               ),
 
@@ -1705,9 +2350,24 @@ class _ChatScreenState extends State<ChatScreen> {
                           child: ListView.builder(
                             controller: scrollController,
                             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                            itemCount: messages.length,
+                            itemCount: inChatSearchQuery.isEmpty
+                                ? messages.length
+                                : messages.where((m) {
+                                    final msgStr = (m['message'] ?? '').toString().toLowerCase();
+                                    final attachStr = (m['attachmentName'] ?? '').toString().toLowerCase();
+                                    return msgStr.contains(inChatSearchQuery) || attachStr.contains(inChatSearchQuery);
+                                  }).length,
                             itemBuilder: (context, index) {
-                              final message = messages[index];
+                              final displayList = inChatSearchQuery.isEmpty
+                                  ? messages
+                                  : messages.where((m) {
+                                      final msgStr = (m['message'] ?? '').toString().toLowerCase();
+                                      final attachStr = (m['attachmentName'] ?? '').toString().toLowerCase();
+                                      return msgStr.contains(inChatSearchQuery) || attachStr.contains(inChatSearchQuery);
+                                    }).toList();
+                              final message = displayList[index];
+
+
                               final bool isMe = message['isMe'] as bool;
                               final bool isDeleted = message['isDeleted'] == true || message['is_deleted'] == true;
                               final bool isEdited = message['isEdited'] == true || message['is_edited'] == true;
@@ -2069,6 +2729,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       ],
                     ),
             ),
+
 
             if (isOtherUserTyping)
               Padding(
