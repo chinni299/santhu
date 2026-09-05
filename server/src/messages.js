@@ -3,36 +3,96 @@ const pool = require("./db");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
+const { authenticateToken } = require("./middleware/authMiddleware");
 
 console.log("MESSAGES ROUTE LOADED ✅");
 
 const router = express.Router();
+router.use(authenticateToken);
 
 const uploadsDir = path.join(__dirname, "../uploads");
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
+// File extension Whitelist and Blacklist
+const ALLOWED_EXTENSIONS = new Set([
+  // Images
+  ".jpg", ".jpeg", ".png", ".webp", ".gif",
+  // Documents
+  ".pdf", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+  // Encrypted binary
+  ".bin"
+]);
+
+// Migration for E2EE columns
+pool.query(`
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS nonce TEXT;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_encrypted BOOLEAN DEFAULT true;
+`).then(() => {
+  console.log("Messages table nonce and is_encrypted columns verified ✅");
+}).catch((err) => {
+  console.error("Migration error for messages E2EE columns:", err.message);
+});
+
+const DANGEROUS_EXTENSIONS = new Set([
+  ".exe", ".bat", ".cmd", ".sh", ".js", ".apk", ".msi", ".vbs", ".ps1", ".php", ".py", ".pl", ".cgi", ".jar", ".scr", ".com", ".pif", ".htm", ".html"
+]);
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, uploadsDir);
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, uniqueSuffix + ext);
+    const originalExt = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, "");
+    const safeExt = ALLOWED_EXTENSIONS.has(originalExt) ? originalExt : ".bin";
+    const uniqueFilename = `${crypto.randomUUID()}${safeExt}`;
+    cb(null, uniqueFilename);
   },
 });
 
 const fileFilter = (req, file, cb) => {
+  const ext = path.extname(file.originalname).toLowerCase();
+  
+  if (DANGEROUS_EXTENSIONS.has(ext) || !ALLOWED_EXTENSIONS.has(ext)) {
+    const error = new Error("UNSUPPORTED_FILE_TYPE");
+    error.code = "UNSUPPORTED_FILE_TYPE";
+    return cb(error, false);
+  }
+  
   cb(null, true);
 };
 
 const upload = multer({
   storage,
-  limits: { fileSize: 25 * 1024 * 1024 },
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB Limit
   fileFilter,
 });
+
+const uploadSingleFile = (req, res, next) => {
+  upload.single("file")(req, res, (err) => {
+    if (err) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        return res.status(413).json({
+          success: false,
+          message: "Attachment too large. Maximum size is 25 MB.",
+        });
+      }
+      if (err.code === "UNSUPPORTED_FILE_TYPE" || err.message === "UNSUPPORTED_FILE_TYPE") {
+        return res.status(415).json({
+          success: false,
+          message: "Unsupported file type. Executable and script files are not allowed.",
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        message: err.message || "File upload failed.",
+      });
+    }
+    next();
+  });
+};
 
 // GET TEST ROUTE (Verify router mounting)
 router.get("/test", (req, res) => {
@@ -40,6 +100,157 @@ router.get("/test", (req, res) => {
     success: true,
     message: "Messages router is mounted correctly ✅",
   });
+});
+
+// GET SECURE PRIVATE ATTACHMENT BY MESSAGE ID
+router.get("/attachments/:messageId", async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const authUserId = req.user.id;
+
+    // 1. Fetch message and attachment info
+    const msgRes = await pool.query(
+      `SELECT m.id, m.conversation_id, m.attachment_url, m.attachment_type, m.attachment_name, m.is_deleted
+       FROM messages m
+       WHERE m.id = $1`,
+      [messageId]
+    );
+
+    if (msgRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Attachment unavailable" });
+    }
+
+    const msg = msgRes.rows[0];
+
+    if (msg.is_deleted || !msg.attachment_url) {
+      return res.status(404).json({ success: false, message: "Attachment unavailable" });
+    }
+
+    // 2. Verify conversation authorization for req.user.id
+    const memberCheck = await pool.query(
+      `SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2`,
+      [msg.conversation_id, authUserId]
+    );
+
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ success: false, message: "Not authorized to access this attachment" });
+    }
+
+    // 3. Extract filename from attachment_url safely
+    const storedFilename = path.basename(msg.attachment_url);
+    const safeFilename = path.basename(storedFilename).replace(/[^a-zA-Z0-9.\-_]/g, "");
+    const filePath = path.join(uploadsDir, safeFilename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, message: "Attachment unavailable" });
+    }
+
+    // 4. Set Content-Type and Disposition
+    const ext = path.extname(safeFilename).toLowerCase();
+    const mimeTypes = {
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".png": "image/png",
+      ".webp": "image/webp",
+      ".gif": "image/gif",
+      ".pdf": "application/pdf",
+      ".txt": "text/plain",
+      ".doc": "application/msword",
+      ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ".xls": "application/vnd.ms-excel",
+      ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      ".ppt": "application/vnd.ms-powerpoint",
+      ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    };
+
+    const contentType = mimeTypes[ext] || "application/octet-stream";
+    const disposition = msg.attachment_type === "image" ? "inline" : `attachment; filename="${encodeURIComponent(msg.attachment_name || safeFilename)}"`;
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", disposition);
+    res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
+
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
+  } catch (error) {
+    console.error("Secure attachment download error:", error.message);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// GET SECURE PRIVATE ATTACHMENT BY FILENAME
+router.get("/attachments/file/:filename", async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const authUserId = req.user.id;
+
+    // Prevent path traversal
+    const safeFilename = path.basename(filename).replace(/[^a-zA-Z0-9.\-_]/g, "");
+
+    // Find corresponding message and conversation
+    const msgRes = await pool.query(
+      `SELECT m.id, m.conversation_id, m.attachment_type, m.attachment_name, m.is_deleted
+       FROM messages m
+       WHERE m.attachment_url LIKE $1`,
+      [`%${safeFilename}`]
+    );
+
+    if (msgRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Attachment unavailable" });
+    }
+
+    const msg = msgRes.rows[0];
+
+    if (msg.is_deleted) {
+      return res.status(404).json({ success: false, message: "Attachment unavailable" });
+    }
+
+    // Verify conversation authorization for req.user.id
+    const memberCheck = await pool.query(
+      `SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2`,
+      [msg.conversation_id, authUserId]
+    );
+
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ success: false, message: "Not authorized to access this attachment" });
+    }
+
+    const filePath = path.join(uploadsDir, safeFilename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, message: "Attachment unavailable" });
+    }
+
+    const ext = path.extname(safeFilename).toLowerCase();
+    const mimeTypes = {
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".png": "image/png",
+      ".webp": "image/webp",
+      ".gif": "image/gif",
+      ".pdf": "application/pdf",
+      ".txt": "text/plain",
+      ".doc": "application/msword",
+      ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ".xls": "application/vnd.ms-excel",
+      ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      ".ppt": "application/vnd.ms-powerpoint",
+      ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    };
+
+    const contentType = mimeTypes[ext] || "application/octet-stream";
+    const disposition = msg.attachment_type === "image" ? "inline" : `attachment; filename="${encodeURIComponent(msg.attachment_name || safeFilename)}"`;
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", disposition);
+    res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
+
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
+  } catch (error) {
+    console.error("Secure attachment download error:", error.message);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
 });
 
 // GET UNREAD MESSAGE COUNT FOR A CONVERSATION AND USER
@@ -77,7 +288,7 @@ router.get("/conversations/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
 
-    const result = await pool.query(
+    let result = await pool.query(
       `SELECT 
         c.id AS conversation_id,
         other_u.id AS other_user_id,
@@ -112,6 +323,48 @@ router.get("/conversations/:userId", async (req, res) => {
       [userId]
     );
 
+    if (result.rows.length === 0) {
+      // Auto-ensure private 2-user conversation exists
+      await pool.query("INSERT INTO conversations (id) VALUES (1) ON CONFLICT (id) DO NOTHING");
+      await pool.query("INSERT INTO conversation_members (conversation_id, user_id) VALUES (1, 1) ON CONFLICT DO NOTHING");
+      await pool.query("INSERT INTO conversation_members (conversation_id, user_id) VALUES (1, 2) ON CONFLICT DO NOTHING");
+
+      result = await pool.query(
+        `SELECT 
+          c.id AS conversation_id,
+          other_u.id AS other_user_id,
+          other_u.name AS other_user_name,
+          other_u.email AS other_user_email,
+          CASE 
+            WHEN latest_m.is_deleted = true THEN 'This message was deleted' 
+            WHEN latest_m.attachment_type = 'image' THEN '📷 Photo'
+            WHEN latest_m.attachment_type IS NOT NULL THEN '📎 File'
+            ELSE latest_m.message 
+          END AS last_message,
+          latest_m.created_at AS last_message_time,
+          COALESCE(unread_m.unread_count, 0)::int AS unread_count
+        FROM conversation_members cm
+        JOIN conversations c ON c.id = cm.conversation_id
+        JOIN conversation_members other_cm ON other_cm.conversation_id = c.id AND other_cm.user_id != cm.user_id
+        JOIN users other_u ON other_u.id = other_cm.user_id
+        LEFT JOIN LATERAL (
+          SELECT message, attachment_type, is_deleted, created_at
+          FROM messages
+          WHERE conversation_id = c.id
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) latest_m ON true
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*)::int AS unread_count
+          FROM messages
+          WHERE conversation_id = c.id AND sender_id != cm.user_id AND is_read = false
+        ) unread_m ON true
+        WHERE cm.user_id = $1
+        ORDER BY COALESCE(latest_m.created_at, c.created_at) DESC`,
+        [userId]
+      );
+    }
+
     console.log(`Fetched ${result.rows.length} conversations for user ${userId} ✅`);
 
     res.json({
@@ -131,11 +384,23 @@ router.get("/conversations/:userId", async (req, res) => {
 router.get("/:conversationId", async (req, res) => {
   try {
     const { conversationId } = req.params;
+    const authUserId = req.user.id;
+
+    // Verify conversation authorization
+    const memberCheck = await pool.query(
+      `SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2`,
+      [conversationId, authUserId]
+    );
+
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ success: false, message: "Not authorized to access messages in this conversation" });
+    }
 
     const result = await pool.query(
       `SELECT 
         m.id, m.conversation_id, m.sender_id, m.message, 
         m.attachment_url, m.attachment_type, m.attachment_name, m.attachment_size,
+        m.nonce, m.is_encrypted,
         m.is_delivered, m.is_read, m.is_edited, m.is_deleted, m.reactions, m.created_at,
         m.reply_to_message_id,
         parent_m.sender_id AS reply_sender_id,
@@ -166,41 +431,63 @@ router.get("/:conversationId", async (req, res) => {
 });
 
 // UPLOAD ATTACHMENT AND CREATE MESSAGE
-router.post("/upload", upload.single("file"), async (req, res) => {
+router.post("/upload", uploadSingleFile, async (req, res) => {
   try {
-    const { conversationId, senderId, message, attachmentType, replyToMessageId } = req.body;
+    const { conversationId, message, attachmentType, replyToMessageId, nonce, isEncrypted } = req.body;
     const file = req.file;
+    const authUserId = req.user.id;
 
-    if (!conversationId || !senderId || !file) {
+    if (!conversationId || !file) {
+      if (file && file.path && fs.existsSync(file.path)) {
+        try { fs.unlinkSync(file.path); } catch (_) {}
+      }
       return res.status(400).json({
         success: false,
-        message: "conversationId, senderId, and file are required",
+        message: "conversationId and file are required",
       });
     }
 
-    const hostIp = "192.168.0.120:5000";
-    const attachmentUrl = `http://${hostIp}/uploads/${file.filename}`;
-    const originalName = file.originalname;
+    // Verify conversation membership using req.user.id
+    const memberCheck = await pool.query(
+      `SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2`,
+      [conversationId, authUserId]
+    );
+
+    if (memberCheck.rows.length === 0) {
+      if (file && file.path && fs.existsSync(file.path)) {
+        try { fs.unlinkSync(file.path); } catch (_) {}
+      }
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to upload attachments to this conversation",
+      });
+    }
+
+    const hostIp = req.headers.host || "localhost:5000";
+    const attachmentUrl = `http://${hostIp}/messages/attachments/file/${file.filename}`;
+    const originalName = path.basename(file.originalname).replace(/[\0\r\n]/g, "");
     const fileSize = file.size;
 
     const result = await pool.query(
-      `INSERT INTO messages (conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, is_delivered, is_read)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, false)
-       RETURNING id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, is_delivered, is_read, is_edited, is_deleted, reactions, created_at`,
+      `INSERT INTO messages (conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, false)
+       RETURNING id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, is_edited, is_deleted, reactions, created_at`,
       [
         conversationId,
-        senderId,
+        authUserId,
         message || "",
         attachmentUrl,
         attachmentType || "file",
         originalName,
         fileSize,
         replyToMessageId || null,
+        nonce || null,
+        isEncrypted !== undefined ? (isEncrypted === "true" || isEncrypted === true) : true,
       ]
     );
 
     const newMessage = result.rows[0];
-    console.log("Attachment message created:", newMessage);
+    console.log("Attachment message created securely:", newMessage.id);
 
     res.status(201).json({
       success: true,
@@ -209,6 +496,9 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     });
   } catch (error) {
     console.error("Upload error:", error.message);
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+    }
     res.status(500).json({
       success: false,
       message: error.message || "Failed to upload attachment",
@@ -219,7 +509,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 // SEND MESSAGE
 router.post("/", async (req, res) => {
   try {
-    const { conversationId, senderId, message, attachmentUrl, attachmentType, attachmentName, attachmentSize, replyToMessageId } = req.body;
+    const { conversationId, senderId, message, attachmentUrl, attachmentType, attachmentName, attachmentSize, replyToMessageId, nonce, isEncrypted } = req.body;
 
     if (!conversationId || !senderId || (!message && !attachmentUrl)) {
       return res.status(400).json({
@@ -229,10 +519,10 @@ router.post("/", async (req, res) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO messages (conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, is_delivered, is_read)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, false)
-       RETURNING id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, is_delivered, is_read, is_edited, is_deleted, created_at`,
-      [conversationId, senderId, message || "", attachmentUrl || null, attachmentType || null, attachmentName || null, attachmentSize || null, replyToMessageId || null]
+      `INSERT INTO messages (conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, false)
+       RETURNING id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, is_edited, is_deleted, reactions, created_at`,
+      [conversationId, senderId, message || "", attachmentUrl || null, attachmentType || null, attachmentName || null, attachmentSize || null, replyToMessageId || null, nonce || null, isEncrypted !== undefined ? isEncrypted : true]
     );
 
     res.status(201).json({
@@ -340,7 +630,10 @@ router.delete("/:messageId", async (req, res) => {
 router.get("/user-status/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
-    const result = await pool.query("SELECT id, name, last_seen_at FROM users WHERE id = $1", [userId]);
+    const result = await pool.query(
+      "SELECT id, name, is_online, last_seen_at FROM users WHERE id = $1",
+      [userId]
+    );
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, message: "User not found" });
     }

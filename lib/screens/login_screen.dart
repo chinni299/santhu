@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import '../config/api_config.dart';
+import '../services/auth_service.dart';
 import '../theme/app_theme.dart';
 import 'conversation_list_screen.dart';
 
@@ -19,7 +21,7 @@ class _LoginScreenState extends State<LoginScreen> {
   bool obscurePassword = true;
   bool isLoading = false;
 
-  static const String baseUrl = 'http://192.168.0.120:5000';
+  String get baseUrl => ApiConfig.baseUrl;
 
   @override
   void initState() {
@@ -38,6 +40,17 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> loginWithUserId(int userId) async {
     FocusScope.of(context).unfocus();
+    try {
+      final email = userId == 1 ? 'user1@example.com' : 'user2@example.com';
+      final res = await AuthService.login(email, 'password123');
+      if (res['success'] == true && res['token'] != null) {
+        debugPrint("Logged in preset user $userId with token ✅");
+      }
+    } catch (e) {
+      debugPrint("Preset login error: $e");
+    }
+
+    if (!mounted) return;
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
@@ -87,11 +100,18 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (!mounted) return;
 
-      if (response.statusCode == 200 && data['success'] == true) {
+      if ((response.statusCode == 200 || response.statusCode == 201) && data['success'] == true) {
         final user = data['user'];
+        final token = data['token'];
         final userId = user != null && user['id'] != null
             ? int.parse(user['id'].toString())
             : 1;
+
+        if (token != null && user != null) {
+          await AuthService.saveSession(token.toString(), Map<String, dynamic>.from(user));
+        }
+
+        if (!mounted) return;
 
         Navigator.pushReplacement(
           context,
@@ -107,9 +127,12 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         );
       } else {
-        // Fallback: If backend is local demo, allow logging in as user 1 or 2 based on email
-        final fallbackUserId = email.contains('2') ? 2 : 1;
-        loginWithUserId(fallbackUserId);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(data['message'] ?? 'Authentication failed'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
       }
     } catch (e) {
       if (!mounted) return;

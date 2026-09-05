@@ -1,6 +1,7 @@
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
+const jwt = require("jsonwebtoken");
 const authRoutes = require("./auth");
 const messageRoutes = require("./messages");
 const cors = require("cors");
@@ -26,6 +27,9 @@ if (fs.existsSync(serviceAccountPath)) {
   );
 }
 
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -35,9 +39,29 @@ const io = new Server(server, {
   },
 });
 
+// Production Security Headers via Helmet
+app.use(helmet());
 app.use(cors());
 app.use(express.json());
-app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
+
+// Rate Limiters
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP
+  message: { success: false, message: "Too many login/registration attempts. Please try again later." },
+});
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 1000,
+  message: { success: false, message: "Too many API requests. Please try again later." },
+});
+
+app.use("/auth/login", authLimiter);
+app.use("/auth/register", authLimiter);
+app.use("/messages", apiLimiter);
+
+// Public /uploads static route removed for security (PHASE 3)
 app.use("/auth", authRoutes);
 app.use("/messages", messageRoutes);
 
@@ -49,6 +73,51 @@ app.get("/", (req, res) => {
     message: "DuoChat backend is running 🚀",
   });
 });
+
+// Helper function for sending privacy-preserving FCM push notifications & cleaning invalid tokens
+async function sendPushNotification({ recipientId, title, body, dataPayload }) {
+  try {
+    const recipientResult = await pool.query("SELECT fcm_token FROM users WHERE id = $1", [recipientId]);
+    const recipientToken = recipientResult.rows[0]?.fcm_token;
+
+    if (!recipientToken) {
+      console.log(`No FCM token registered for User ${recipientId}. Notification skipped.`);
+      return;
+    }
+
+    console.log(`Sending Push Notification to User ${recipientId}: Title="${title}", Body="${body}"`);
+
+    if (admin.apps && admin.apps.length > 0) {
+      try {
+        const response = await admin.messaging().send({
+          token: recipientToken,
+          notification: {
+            title: title,
+            body: body,
+          },
+          data: dataPayload || {},
+        });
+        console.log(`FCM Push Notification sent successfully to User ${recipientId}: ${response} 🔔`);
+      } catch (fcmErr) {
+        console.error(`FCM send error for User ${recipientId}: ${fcmErr.message} ❌`);
+        const errStr = String(fcmErr.message || fcmErr.code || "");
+        if (
+          errStr.includes("not-registered") ||
+          errStr.includes("invalid-registration-token") ||
+          errStr.includes("Requested entity was not found") ||
+          errStr.includes("registration-token-not-registered")
+        ) {
+          await pool.query("UPDATE users SET fcm_token = NULL WHERE id = $1", [recipientId]);
+          console.log(`Cleaned up invalid FCM token for User ${recipientId} 🧹`);
+        }
+      }
+    } else {
+      console.log(`[Push Notification Simulation] Title: "${title}", Body: "${body}" -> Sent to User ${recipientId} 🔔`);
+    }
+  } catch (err) {
+    console.error(`Error in sendPushNotification for User ${recipientId}:`, err.message);
+  }
+}
 
 // PostgreSQL connection test
 app.get("/db-test", async (req, res) => {
@@ -70,11 +139,60 @@ app.get("/db-test", async (req, res) => {
   }
 });
 
+// Strict Socket.IO Authentication Middleware (REJECTS unauthenticated connections)
+io.use((socket, next) => {
+  const token =
+    socket.handshake.auth?.token ||
+    socket.handshake.headers?.authorization?.split(" ")[1] ||
+    socket.handshake.query?.token;
+
+  if (!token) {
+    const err = new Error("Authentication error: JWT token required");
+    err.data = { code: 401 };
+    return next(err);
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "duochat_super_secret_key_2026");
+    socket.user = decoded;
+    return next();
+  } catch (err) {
+    const authErr = new Error("Authentication error: Invalid or expired token");
+    authErr.data = { code: 401 };
+    return next(authErr);
+  }
+});
+
+// Global active WebRTC calls registry
+const activeCalls = new Map(); // conversationId -> { callerId, recipientId, isVideoCall, status }
+// Global active user socket connections registry: userId -> Set<socketId>
+const userSockets = new Map();
+
 // Socket.IO Connection Handler
 io.on("connection", (socket) => {
-  console.log(`User connected: ${socket.id}`);
+  const authUserId = socket.user?.userId || socket.user?.id;
+  if (authUserId) {
+    const numId = Number(authUserId);
+    socket.join(`user_${numId}`);
+    socket.data.userId = numId;
 
-  // Join User Room (For global notifications, unread counts & status updates)
+    if (!userSockets.has(numId)) {
+      userSockets.set(numId, new Set());
+    }
+    const socketSet = userSockets.get(numId);
+    socketSet.add(socket.id);
+
+    if (socketSet.size === 1) {
+      pool.query("UPDATE users SET is_online = true WHERE id = $1", [numId]).catch(() => {});
+      const recipientId = numId === 1 ? 2 : 1;
+      io.to(`user_${recipientId}`).emit("userOnline", { userId: numId, conversationId: 1 });
+      console.log(`User ${numId} is now ONLINE (1st socket: ${socket.id}) 🟢`);
+    } else {
+      console.log(`User ${numId} connected additional socket (${socket.id}, active sockets: ${socketSet.size})`);
+    }
+  }
+
+  // Join User Room
   socket.on("joinUserRoom", (data) => {
     const userId = typeof data === "object" && data !== null ? data.userId : data;
     if (userId) {
@@ -101,15 +219,9 @@ io.on("connection", (socket) => {
       const userRoom = `user_${userId}`;
       socket.join(userRoom);
       socket.data.userId = userId;
-    }
 
-    socket.data.conversationId = conversationId;
-    socket.data.userName = userName;
+      pool.query("UPDATE users SET is_online = true WHERE id = $1", [userId]).catch(() => {});
 
-    console.log(`User ${userId || socket.id} joined conversation room: ${room}`);
-
-    // Notify other users in the room that this user is online
-    if (userId) {
       socket.to(room).emit("userOnline", { conversationId, userId, userName });
       io.emit("userOnline", { conversationId, userId, userName });
 
@@ -135,11 +247,22 @@ io.on("connection", (socket) => {
   // Send Message Event
   socket.on("sendMessage", async (data) => {
     try {
-      const { conversationId, senderId, message, attachmentUrl, attachmentType, attachmentName, attachmentSize, replyToMessageId, messageId, isAlreadySaved, tempMsgId } = data;
-      console.log("Message received:", data);
+      const { conversationId, message, attachmentUrl, attachmentType, attachmentName, attachmentSize, replyToMessageId, messageId, isAlreadySaved, tempMsgId, nonce, isEncrypted } = data;
+      // Derive sender identity strictly from authenticated socket JWT
+      const senderId = socket.user?.userId || socket.data?.userId;
 
       if (!conversationId || !senderId || (!message && !attachmentUrl)) {
         console.error("Invalid message payload:", data);
+        return;
+      }
+
+      // Verify conversation membership for senderId
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, senderId]
+      );
+      if (memberCheck.rows.length === 0) {
+        console.warn(`Unauthorized sendMessage attempt by user ${senderId} in conversation ${conversationId}`);
         return;
       }
 
@@ -148,7 +271,7 @@ io.on("connection", (socket) => {
       if (messageId || isAlreadySaved) {
         // Message was already saved to DB by /messages/upload endpoint!
         const existingRes = await pool.query(
-          `SELECT id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, is_delivered, is_read, is_edited, is_deleted, reactions, created_at
+          `SELECT id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, is_edited, is_deleted, reactions, created_at
            FROM messages WHERE id = $1`,
           [messageId]
         );
@@ -160,10 +283,10 @@ io.on("connection", (socket) => {
       if (!newMessage) {
         // Save to PostgreSQL database
         const result = await pool.query(
-          `INSERT INTO messages (conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, is_delivered, is_read)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, false)
-           RETURNING id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, is_delivered, is_read, is_edited, is_deleted, reactions, created_at`,
-          [conversationId, senderId, message || "", attachmentUrl || null, attachmentType || null, attachmentName || null, attachmentSize || null, replyToMessageId || null]
+          `INSERT INTO messages (conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, false)
+           RETURNING id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, is_edited, is_deleted, reactions, created_at`,
+          [conversationId, senderId, message || "", attachmentUrl || null, attachmentType || null, attachmentName || null, attachmentSize || null, replyToMessageId || null, nonce || null, isEncrypted !== undefined ? isEncrypted : true]
         );
 
         newMessage = result.rows[0];
@@ -246,50 +369,17 @@ io.on("connection", (socket) => {
         const senderResult = await pool.query("SELECT name FROM users WHERE id = $1", [senderId]);
         const recipientResult = await pool.query("SELECT fcm_token FROM users WHERE id = $1", [recipientId]);
 
-        const senderName = senderResult.rows[0]?.name || (Number(senderId) === 1 ? "User 1" : "User 2");
-        const recipientToken = recipientResult.rows[0]?.fcm_token;
-
-        console.log(
-          `Push Notification Check: Sender="${senderName}", Recipient=${recipientId}, Token=${
-            recipientToken ? recipientToken.substring(0, 15) + '...' : 'NULL'
-          }`
-        );
-
-        let notifBody = message;
-        if (!notifBody || notifBody.trim().length === 0) {
-          if (attachmentType === 'image') {
-            notifBody = "📷 Photo";
-          } else if (attachmentType) {
-            notifBody = "📎 File";
-          }
-        }
-
-        if (recipientToken) {
-          if (admin.apps && admin.apps.length > 0) {
-            try {
-              const response = await admin.messaging().send({
-                token: recipientToken,
-                notification: {
-                  title: senderName,
-                  body: notifBody,
-                },
-                data: {
-                  conversationId: String(conversationId),
-                  senderId: String(senderId),
-                },
-              });
-              console.log(`FCM Push Notification sent successfully to User ${recipientId}: ${response} 🔔`);
-            } catch (fcmErr) {
-              console.error(`Error sending FCM Notification: ${fcmErr.message} ❌`);
-            }
-          } else {
-            console.log(
-              `[Push Notification Simulation] Title: "${senderName}", Body: "${notifBody}" -> Sent to User ${recipientId} 🔔`
-            );
-          }
-        } else {
-          console.log(`No FCM token found for User ${recipientId}. Notification skipped.`);
-        }
+        // Send generic privacy-preserving push notification (never leaking private text)
+        await sendPushNotification({
+          recipientId,
+          title: "DuoChat",
+          body: "New message",
+          dataPayload: {
+            conversationId: String(conversationId),
+            senderId: String(senderId),
+            type: "message",
+          },
+        });
       }
     } catch (error) {
       console.error("Error saving/broadcasting message:", error.message);
@@ -483,42 +573,313 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Typing Event
-  socket.on("typing", (data) => {
-    const { conversationId, senderId, userName } = data || {};
-    const room = String(conversationId);
-    console.log(`User typing in room ${room}: ${userName || senderId || 'User'}`);
-    socket.to(room).emit("typing", data);
+  // Typing Event (Validated against authenticated JWT identity & conversation membership)
+  socket.on("typing", async (data) => {
+    try {
+      const { conversationId } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, senderId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+      const userName = Number(senderId) === 1 ? "User 1" : "User 2";
+      io.to(`user_${recipientId}`).emit("typing", {
+        conversationId: Number(conversationId),
+        senderId: Number(senderId),
+        userName,
+      });
+    } catch (err) {
+      console.error("Error handling typing event:", err.message);
+    }
   });
 
   // Stop Typing Event
-  socket.on("stopTyping", (data) => {
-    const { conversationId, senderId, userName } = data || {};
+  socket.on("stopTyping", async (data) => {
+    try {
+      const { conversationId } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId) return;
+
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+      const userName = Number(senderId) === 1 ? "User 1" : "User 2";
+      io.to(`user_${recipientId}`).emit("stopTyping", {
+        conversationId: Number(conversationId),
+        senderId: Number(senderId),
+        userName,
+      });
+    } catch (err) {
+      console.error("Error handling stopTyping event:", err.message);
+    }
+  });
+
+  // Instagram Vanish Mode Toggle Event
+  socket.on("toggleVanishMode", (data) => {
+    const { conversationId, isVanishMode, senderId } = data || {};
     const room = String(conversationId);
-    console.log(`User stopped typing in room ${room}: ${userName || senderId || 'User'}`);
-    socket.to(room).emit("stopTyping", data);
+    console.log(`Vanish mode toggled in room ${room} to ${isVanishMode} by user ${senderId} 🔮`);
+    io.to(room).emit("vanishModeToggle", { conversationId, isVanishMode, senderId });
+  });
+
+  // ==================================================
+  // PHASE 4: WEBRTC 1-TO-1 CALL SIGNALING HANDLERS
+  // ==================================================
+
+  socket.on("callUser", async (data) => {
+    try {
+      const { conversationId, isVideoCall, callerName } = data || {};
+      const callerId = socket.user?.userId || socket.data?.userId;
+
+      if (!conversationId || !callerId) {
+        return socket.emit("callError", { message: "Invalid call payload" });
+      }
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, callerId]
+      );
+      if (memberCheck.rows.length === 0) {
+        return socket.emit("callError", { message: "Not authorized in this conversation" });
+      }
+
+      if (activeCalls.has(String(conversationId))) {
+        return socket.emit("callError", { message: "Call already in progress in this conversation" });
+      }
+
+      const recipientId = Number(callerId) === 1 ? 2 : 1;
+      activeCalls.set(String(conversationId), {
+        callerId: Number(callerId),
+        recipientId: Number(recipientId),
+        isVideoCall: !!isVideoCall,
+        status: "calling",
+      });
+
+      console.log(`Call initiated by User ${callerId} to User ${recipientId} in conversation ${conversationId} (Video: ${!!isVideoCall}) 📞`);
+
+      io.to(`user_${recipientId}`).emit("incomingCall", {
+        conversationId: Number(conversationId),
+        callerId: Number(callerId),
+        callerName: callerName || (Number(callerId) === 1 ? "User 1" : "User 2"),
+        isVideoCall: !!isVideoCall,
+      });
+
+      // Send generic call push notification if recipient is backgrounded/offline
+      const roomSockets = io.sockets.adapter.rooms.get(String(conversationId));
+      let isRecipientActiveInRoom = false;
+      if (roomSockets) {
+        for (const socketId of roomSockets) {
+          const s = io.sockets.sockets.get(socketId);
+          if (s && s.data && s.data.userId && Number(s.data.userId) === Number(recipientId)) {
+            isRecipientActiveInRoom = true;
+            break;
+          }
+        }
+      }
+
+      if (!isRecipientActiveInRoom) {
+        await sendPushNotification({
+          recipientId,
+          title: "DuoChat",
+          body: isVideoCall ? "Incoming Video Call" : "Incoming Audio Call",
+          dataPayload: {
+            conversationId: String(conversationId),
+            callerId: String(callerId),
+            type: "call",
+            isVideoCall: String(!!isVideoCall),
+          },
+        });
+      }
+    } catch (err) {
+      console.error("Error in callUser socket event:", err.message);
+    }
+  });
+
+  socket.on("acceptCall", async (data) => {
+    try {
+      const { conversationId } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !userId) return;
+
+      const call = activeCalls.get(String(conversationId));
+      if (call) {
+        call.status = "active";
+        console.log(`Call accepted by User ${userId} in conversation ${conversationId} ✅`);
+        io.to(`user_${call.callerId}`).emit("callAccepted", {
+          conversationId: Number(conversationId),
+          acceptedBy: Number(userId),
+        });
+      }
+    } catch (err) {
+      console.error("Error in acceptCall socket event:", err.message);
+    }
+  });
+
+  socket.on("rejectCall", (data) => {
+    try {
+      const { conversationId, reason } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
+      const call = activeCalls.get(String(conversationId));
+      if (call) {
+        console.log(`Call rejected by User ${userId} in conversation ${conversationId} ❌`);
+        io.to(`user_${call.callerId}`).emit("callRejected", {
+          conversationId: Number(conversationId),
+          rejectedBy: Number(userId),
+          reason: reason || "declined",
+        });
+        activeCalls.delete(String(conversationId));
+      }
+    } catch (err) {
+      console.error("Error in rejectCall socket event:", err.message);
+    }
+  });
+
+  socket.on("cancelCall", (data) => {
+    try {
+      const { conversationId } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
+      const call = activeCalls.get(String(conversationId));
+      if (call && Number(call.callerId) === Number(userId)) {
+        console.log(`Call cancelled by caller User ${userId} in conversation ${conversationId} 🚫`);
+        io.to(`user_${call.recipientId}`).emit("callCancelled", {
+          conversationId: Number(conversationId),
+          cancelledBy: Number(userId),
+        });
+        activeCalls.delete(String(conversationId));
+      }
+    } catch (err) {
+      console.error("Error in cancelCall socket event:", err.message);
+    }
+  });
+
+  socket.on("webrtcOffer", async (data) => {
+    try {
+      const { conversationId, sdp } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId || !sdp) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, senderId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+      io.to(`user_${recipientId}`).emit("webrtcOffer", {
+        conversationId: Number(conversationId),
+        sdp,
+        senderId: Number(senderId),
+      });
+    } catch (err) {
+      console.error("Error in webrtcOffer:", err.message);
+    }
+  });
+
+  socket.on("webrtcAnswer", async (data) => {
+    try {
+      const { conversationId, sdp } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId || !sdp) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, senderId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+      io.to(`user_${recipientId}`).emit("webrtcAnswer", {
+        conversationId: Number(conversationId),
+        sdp,
+        senderId: Number(senderId),
+      });
+    } catch (err) {
+      console.error("Error in webrtcAnswer:", err.message);
+    }
+  });
+
+  socket.on("webrtcIceCandidate", async (data) => {
+    try {
+      const { conversationId, candidate } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId || !candidate) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, senderId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+      io.to(`user_${recipientId}`).emit("webrtcIceCandidate", {
+        conversationId: Number(conversationId),
+        candidate,
+        senderId: Number(senderId),
+      });
+    } catch (err) {
+      console.error("Error in webrtcIceCandidate:", err.message);
+    }
+  });
+
+  socket.on("endCall", (data) => {
+    try {
+      const { conversationId } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId) return;
+
+      activeCalls.delete(String(conversationId));
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+      io.to(`user_${recipientId}`).to(String(conversationId)).emit("callEnded", {
+        conversationId: Number(conversationId),
+        endedBy: Number(senderId),
+      });
+      console.log(`Call ended by User ${senderId} in conversation ${conversationId} ⏹️`);
+    } catch (err) {
+      console.error("Error in endCall socket event:", err.message);
+    }
   });
 
   socket.on("disconnect", async () => {
-    console.log(`User disconnected: ${socket.id}`);
-    if (socket.data && socket.data.conversationId && socket.data.userId) {
-      const room = String(socket.data.conversationId);
-      const userId = socket.data.userId;
-      const lastSeenAt = new Date().toISOString();
+    console.log(`Socket disconnected: ${socket.id}`);
+    const userId = socket.user?.userId || socket.user?.id || socket.data?.userId;
 
-      try {
-        await pool.query("UPDATE users SET last_seen_at = NOW() WHERE id = $1", [userId]);
-      } catch (err) {
-        console.error("Error updating last_seen_at:", err.message);
+    if (userId && userSockets.has(Number(userId))) {
+      const socketSet = userSockets.get(Number(userId));
+      socketSet.delete(socket.id);
+
+      if (socketSet.size === 0) {
+        userSockets.delete(Number(userId));
+        const lastSeenAt = new Date().toISOString();
+
+        try {
+          await pool.query("UPDATE users SET is_online = false, last_seen_at = NOW() WHERE id = $1", [userId]);
+        } catch (err) {
+          console.error("Error updating last_seen_at:", err.message);
+        }
+
+        const recipientId = Number(userId) === 1 ? 2 : 1;
+        io.to(`user_${recipientId}`).emit("userOffline", {
+          conversationId: 1,
+          userId: Number(userId),
+          lastSeenAt: lastSeenAt,
+        });
+        console.log(`User ${userId} went OFFLINE (last socket disconnected) at ${lastSeenAt} 🔴`);
+      } else {
+        console.log(`User ${userId} disconnected 1 socket (${socketSet.size} remaining active)`);
       }
-
-      io.to(room).emit("userOffline", {
-        conversationId: socket.data.conversationId,
-        userId: userId,
-        lastSeenAt: lastSeenAt,
-      });
-      console.log(`User ${userId} went offline in room ${room} at ${lastSeenAt}`);
     }
+  });
+});
+
+// Global Production Error Handling Middleware (No stack traces or path leaks)
+app.use((err, req, res, next) => {
+  console.error("Unhandled Error:", err.message);
+  res.status(err.status || 500).json({
+    success: false,
+    message: err.message && process.env.NODE_ENV === "development" ? err.message : "An internal server error occurred",
   });
 });
 
