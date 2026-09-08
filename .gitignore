@@ -53,3 +53,9 @@ build/
 # Node / Server / Scratch related
 server/node_modules/
 scratch/
+
+# Environment secrets - NEVER commit these
+server/.env
+server/check_db.js
+server/uploads/
+*.rej
