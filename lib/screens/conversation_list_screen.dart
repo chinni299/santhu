@@ -56,26 +56,34 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
     });
   }
 
-  void _initSocket() {
+  Future<void> _initSocket() async {
+    final token = await AuthService.getTokenForUser(widget.currentUserId);
+    final socketUrl = baseUrl;
+
     socket = io.io(
-      baseUrl,
+      socketUrl,
       io.OptionBuilder()
           .setTransports(['websocket'])
+          .setAuth({'token': token})
+          // .forceNew(true) // removed for compatibility with socket_io_client v3
           .disableAutoConnect()
           .build(),
     );
 
-    AuthService.getToken().then((token) {
-      if (token != null && token.isNotEmpty) {
-        socket?.io.options?['auth'] = {'token': token};
-      }
-      socket?.connect();
-    });
+    void joinRooms() {
+      debugPrint('âœ… ConversationListSocket joining rooms');
+      _joinRooms();
+    }
 
     socket?.onConnect((_) {
-      debugPrint("ConversationListSocket connected: ${socket?.id}");
-      _joinRooms();
+      debugPrint('âœ… ConversationListSocket connected: ${socket?.id}');
+      joinRooms();
     });
+
+    if (socket?.connected == true) {
+      debugPrint('âœ… ConversationListSocket ALREADY connected: ${socket?.id}');
+      joinRooms();
+    }
 
     socket?.on('newMessage', (data) {
       if (data == null || !mounted) return;
@@ -185,7 +193,7 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
 
   Future<void> fetchConversations() async {
     try {
-      var headers = await AuthService.getAuthHeaders();
+      var headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
       var response = await http.get(
         Uri.parse('$baseUrl/messages/conversations/${widget.currentUserId}'),
         headers: headers,
@@ -196,7 +204,7 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
         final email = widget.currentUserId == 1 ? 'user1@example.com' : 'user2@example.com';
         final loginRes = await AuthService.login(email, 'password123');
         if (loginRes['success'] == true && loginRes['token'] != null) {
-          headers = await AuthService.getAuthHeaders();
+          headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
           response = await http.get(
             Uri.parse('$baseUrl/messages/conversations/${widget.currentUserId}'),
             headers: headers,
@@ -693,3 +701,4 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
     );
   }
 }
+

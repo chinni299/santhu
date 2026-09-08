@@ -40,8 +40,8 @@ const io = new Server(server, {
 });
 
 // Production Security Headers via Helmet
-app.use(helmet());
-app.use(cors());
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
+app.use(cors({ origin: "*" })); // JWT Bearer token doesn't require credentials: true
 app.use(express.json());
 
 // Rate Limiters
@@ -58,8 +58,12 @@ const apiLimiter = rateLimit({
 });
 
 app.use("/auth/login", authLimiter);
-app.use("/auth/register", authLimiter);
 app.use("/messages", apiLimiter);
+
+// Registration is permanently disabled.
+app.all("/auth/register", (req, res) => {
+  res.status(404).json({ success: false, message: "Not found" });
+});
 
 // Public /uploads static route removed for security (PHASE 3)
 app.use("/auth", authRoutes);
@@ -141,6 +145,12 @@ app.get("/db-test", async (req, res) => {
 
 // Strict Socket.IO Authentication Middleware (REJECTS unauthenticated connections)
 io.use((socket, next) => {
+  console.log(`[SERVER SOCKET] Incoming connection. Handshake data:`, JSON.stringify({
+    auth: socket.handshake.auth,
+    headers: socket.handshake.headers,
+    query: socket.handshake.query
+  }));
+
   const token =
     socket.handshake.auth?.token ||
     socket.handshake.headers?.authorization?.split(" ")[1] ||
@@ -153,8 +163,22 @@ io.use((socket, next) => {
   }
 
   try {
+    if (!process.env.JWT_SECRET) {
+      console.error("[SERVER SOCKET] JWT_SECRET is missing!");
+    }
     const decoded = jwt.verify(token, process.env.JWT_SECRET || "duochat_super_secret_key_2026");
+    
+    // Strict 2-User Enforcement
+    const uid = Number(decoded.userId || decoded.id);
+    if (uid !== 1 && uid !== 2) {
+      console.warn(`[SERVER SOCKET] REJECTED unauthorized userId: ${uid}`);
+      const authErr = new Error("Authentication error: Unauthorized identity");
+      authErr.data = { code: 403 };
+      return next(authErr);
+    }
+    
     socket.user = decoded;
+    console.log(`[SERVER SOCKET] AUTH SUCCESS: User ${uid}`);
     return next();
   } catch (err) {
     const authErr = new Error("Authentication error: Invalid or expired token");
@@ -171,6 +195,8 @@ const userSockets = new Map();
 // Socket.IO Connection Handler
 io.on("connection", (socket) => {
   const authUserId = socket.user?.userId || socket.user?.id;
+  console.log(`[SERVER SOCKET] CLIENT CONNECTED: socketId=${socket.id}`);
+  console.log(`[SERVER SOCKET] USER: ${authUserId}`);
   if (authUserId) {
     const numId = Number(authUserId);
     socket.join(`user_${numId}`);
@@ -214,6 +240,7 @@ io.on("connection", (socket) => {
 
     const room = String(conversationId);
     socket.join(room);
+    console.log(`[SERVER SOCKET] JOIN ROOM: ${room} by socketId=${socket.id} (UserId: ${userId})`);
 
     if (userId) {
       const userRoom = `user_${userId}`;
@@ -250,6 +277,7 @@ io.on("connection", (socket) => {
       const { conversationId, message, attachmentUrl, attachmentType, attachmentName, attachmentSize, replyToMessageId, messageId, isAlreadySaved, tempMsgId, nonce, isEncrypted } = data;
       // Derive sender identity strictly from authenticated socket JWT
       const senderId = socket.user?.userId || socket.data?.userId;
+      console.log(`[SERVER SOCKET] sendMessage RECEIVED:`, { conversationId, senderId, message });
 
       if (!conversationId || !senderId || (!message && !attachmentUrl)) {
         console.error("Invalid message payload:", data);
@@ -317,13 +345,25 @@ io.on("connection", (socket) => {
       }
 
       console.log("Message saved:", newMessage);
+      console.log(`[SERVER SOCKET] MESSAGE SAVED:`, newMessage.id);
 
       const room = String(conversationId);
       const recipientId = Number(senderId) === 1 ? 2 : 1;
 
-      // Broadcast newMessage to chat room AND recipient user room
-      io.to(room).to(`user_${recipientId}`).emit("newMessage", newMessage);
-      console.log(`newMessage emitted to room ${room} and user_${recipientId}:`, newMessage);
+      // Emit to the SENDER with is_mine:true (they sent this message)
+      socket.emit("newMessage", { ...newMessage, is_mine: true });
+
+      // Emit to RECIPIENT socket(s) with is_mine:false (they received this message)
+      io.to(`user_${recipientId}`).emit("newMessage", { ...newMessage, is_mine: false });
+
+      // Also emit to other sockets of the sender (multi-tab) with is_mine:true
+      socket.to(`user_${senderId}`).emit("newMessage", { ...newMessage, is_mine: true });
+
+      console.log(`newMessage emitted: sender=${senderId}(is_mine:true) recipient=${recipientId}(is_mine:false)`);
+      console.log(`[SERVER SOCKET] EMITTING newMessage TO ROOM: ${room}`);
+      
+      const roomSocketsSet = io.sockets.adapter.rooms.get(room);
+      console.log(`[SERVER SOCKET] ROOM MEMBERS for ${room}:`, roomSocketsSet ? Array.from(roomSocketsSet) : []);
 
       // Fetch updated unread count
       const unreadRes = await pool.query(
@@ -389,7 +429,8 @@ io.on("connection", (socket) => {
   // Mark Messages Delivered Event
   socket.on("markMessagesDelivered", async (data) => {
     try {
-      const { conversationId, userId } = data || {};
+      const { conversationId } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
       if (!conversationId || !userId) return;
 
       const result = await pool.query(
@@ -424,7 +465,8 @@ io.on("connection", (socket) => {
   // Mark Messages Seen Event
   socket.on("markMessagesSeen", async (data) => {
     try {
-      const { conversationId, userId } = data || {};
+      const { conversationId } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
       if (!conversationId || !userId) return;
 
       const result = await pool.query(
@@ -543,7 +585,8 @@ io.on("connection", (socket) => {
   // React to Message Event
   socket.on("reactToMessage", async (data) => {
     try {
-      const { conversationId, messageId, userId, emoji } = data || {};
+      const { conversationId, messageId, emoji } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
       if (!conversationId || !messageId || !userId) return;
 
       const checkMsg = await pool.query("SELECT reactions FROM messages WHERE id = $1", [messageId]);
@@ -885,6 +928,57 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 5000;
 
-server.listen(PORT, () => {
-  console.log(`DuoChat server running on port ${PORT}`);
+// Strict 2-User Database Seeding
+async function enforcePrivateTwoUserApp() {
+  const email1 = (process.env.DUO_USER1_EMAIL || "user1@duochat.local").trim().toLowerCase();
+  const email2 = (process.env.DUO_USER2_EMAIL || "user2@duochat.local").trim().toLowerCase();
+
+  console.log("[DB SEED] Enforcing strict 2-user private mode...");
+
+  // Each step isolated — one failure won't block others
+  try {
+    await pool.query(
+      `INSERT INTO users (id, name, email, password_hash)
+       VALUES (1, 'User 1', $1, 'LOCKED_NO_LOGIN')
+       ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email`,
+      [email1]
+    );
+    console.log("[DB SEED] User 1 OK ✅");
+  } catch (e) { console.error("[DB SEED] User 1 error:", e.message); }
+
+  try {
+    await pool.query(
+      `INSERT INTO users (id, name, email, password_hash)
+       VALUES (2, 'User 2', $1, 'LOCKED_NO_LOGIN')
+       ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email`,
+      [email2]
+    );
+    console.log("[DB SEED] User 2 OK ✅");
+  } catch (e) { console.error("[DB SEED] User 2 error:", e.message); }
+
+  try {
+    // conversations table has only: id, created_at — no type column
+    await pool.query(
+      `INSERT INTO conversations (id) VALUES (1) ON CONFLICT (id) DO NOTHING`
+    );
+    console.log("[DB SEED] Conversation OK ✅");
+  } catch (e) { console.error("[DB SEED] Conversation error:", e.message); }
+
+  try {
+    await pool.query(
+      `INSERT INTO conversation_members (conversation_id, user_id) VALUES (1, 1) ON CONFLICT DO NOTHING`
+    );
+    await pool.query(
+      `INSERT INTO conversation_members (conversation_id, user_id) VALUES (1, 2) ON CONFLICT DO NOTHING`
+    );
+    console.log("[DB SEED] Conversation members OK ✅");
+  } catch (e) { console.error("[DB SEED] Conv members error:", e.message); }
+
+  console.log("[DB SEED] Setup complete.");
+}
+
+enforcePrivateTwoUserApp().then(() => {
+  server.listen(PORT, () => {
+    console.log(`DuoChat server running on port ${PORT}`);
+  });
 });

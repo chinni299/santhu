@@ -408,13 +408,14 @@ router.get("/:conversationId", async (req, res) => {
         parent_m.message AS reply_message,
         parent_m.attachment_type AS reply_attachment_type,
         parent_m.attachment_name AS reply_attachment_name,
-        parent_m.is_deleted AS reply_is_deleted
+        parent_m.is_deleted AS reply_is_deleted,
+        (m.sender_id = $2) AS is_mine
        FROM messages m
        LEFT JOIN messages parent_m ON parent_m.id = m.reply_to_message_id
        LEFT JOIN users parent_u ON parent_u.id = parent_m.sender_id
        WHERE m.conversation_id = $1
        ORDER BY m.created_at ASC`,
-      [conversationId]
+      [conversationId, authUserId]
     );
 
     res.json({
@@ -429,6 +430,7 @@ router.get("/:conversationId", async (req, res) => {
     });
   }
 });
+
 
 // UPLOAD ATTACHMENT AND CREATE MESSAGE
 router.post("/upload", uploadSingleFile, async (req, res) => {

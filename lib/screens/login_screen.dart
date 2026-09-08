@@ -7,7 +7,9 @@ import '../theme/app_theme.dart';
 import 'conversation_list_screen.dart';
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  final void Function(Map<String, dynamic> user)? onLoginSuccess;
+
+  const LoginScreen({super.key, this.onLoginSuccess});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -17,19 +19,10 @@ class _LoginScreenState extends State<LoginScreen> {
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
 
-  bool isSignUpMode = false;
   bool obscurePassword = true;
   bool isLoading = false;
 
   String get baseUrl => ApiConfig.baseUrl;
-
-  @override
-  void initState() {
-    super.initState();
-    // Default preset for easy testing
-    emailController.text = 'user1@example.com';
-    passwordController.text = 'password123';
-  }
 
   @override
   void dispose() {
@@ -38,34 +31,7 @@ class _LoginScreenState extends State<LoginScreen> {
     super.dispose();
   }
 
-  Future<void> loginWithUserId(int userId) async {
-    FocusScope.of(context).unfocus();
-    try {
-      final email = userId == 1 ? 'user1@example.com' : 'user2@example.com';
-      final res = await AuthService.login(email, 'password123');
-      if (res['success'] == true && res['token'] != null) {
-        debugPrint("Logged in preset user $userId with token ✅");
-      }
-    } catch (e) {
-      debugPrint("Preset login error: $e");
-    }
-
-    if (!mounted) return;
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ConversationListScreen(currentUserId: userId),
-      ),
-    );
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Logged in as User $userId 👋'),
-        backgroundColor: AppTheme.primaryTeal,
-      ),
-    );
-  }
-
-  Future<void> handleAuth() async {
+  Future<void> handleLogin() async {
     FocusScope.of(context).unfocus();
 
     final email = emailController.text.trim();
@@ -85,22 +51,20 @@ class _LoginScreenState extends State<LoginScreen> {
     });
 
     try {
-      final endpoint = isSignUpMode ? '$baseUrl/auth/register' : '$baseUrl/auth/login';
       final response = await http.post(
-        Uri.parse(endpoint),
+        Uri.parse('$baseUrl/auth/login'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'email': email,
           'password': password,
-          if (isSignUpMode) 'name': email.split('@').first,
         }),
       );
 
-      final data = jsonDecode(response.body);
+      final data = jsonDecode(utf8.decode(response.bodyBytes));
 
       if (!mounted) return;
 
-      if ((response.statusCode == 200 || response.statusCode == 201) && data['success'] == true) {
+      if (response.statusCode == 200 && data['success'] == true) {
         final user = data['user'];
         final token = data['token'];
         final userId = user != null && user['id'] != null
@@ -113,32 +77,41 @@ class _LoginScreenState extends State<LoginScreen> {
 
         if (!mounted) return;
 
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => ConversationListScreen(currentUserId: userId),
-          ),
-        );
+        // If a callback is provided (app.dart controls navigation), use it.
+        // Otherwise fall back to direct Navigator push (standalone use).
+        if (widget.onLoginSuccess != null) {
+          widget.onLoginSuccess!(Map<String, dynamic>.from(user ?? {'id': userId}));
+        } else {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ConversationListScreen(currentUserId: userId),
+            ),
+          );
+        }
 
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Welcome ${user['name'] ?? 'Back'} 👋'),
+            content: Text('Welcome ${user?['name'] ?? 'Back'} 👋'),
             backgroundColor: AppTheme.primaryTeal,
           ),
         );
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(data['message'] ?? 'Authentication failed'),
+            content: Text(data['message'] ?? 'Invalid email or password'),
             backgroundColor: Colors.redAccent,
           ),
         );
       }
     } catch (e) {
       if (!mounted) return;
-      // Fallback for offline local dev mode
-      final fallbackUserId = email.contains('2') ? 2 : 1;
-      loginWithUserId(fallbackUserId);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not connect to server. Check your connection.'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
     } finally {
       if (mounted) {
         setState(() {
@@ -202,7 +175,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                   ),
 
-                  // Center 3D Illustration Avatar Stack
+                  // Center Logo
                   Column(
                     children: [
                       Container(
@@ -245,7 +218,7 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
 
-            // Floating Claymorphism Card Container
+            // Login Card
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
               child: ConstrainedBox(
@@ -268,7 +241,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     children: [
                       // Card Header
                       Text(
-                        isSignUpMode ? 'Create Account' : 'Welcome Back!',
+                        'Welcome Back!',
                         style: TextStyle(
                           fontSize: 26,
                           fontWeight: FontWeight.w900,
@@ -277,7 +250,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        isSignUpMode ? 'Sign up to start chatting' : 'Login to continue',
+                        'Login to continue',
                         style: TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w700,
@@ -287,7 +260,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
                       const SizedBox(height: 28),
 
-                      // Username / Email Input Pill
+                      // Email Input
                       Container(
                         decoration: BoxDecoration(
                           color: isDark ? const Color(0xFF121E24) : const Color(0xFFF5F7F8),
@@ -302,7 +275,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             fontSize: 15,
                           ),
                           decoration: InputDecoration(
-                            hintText: 'Username / Email',
+                            hintText: 'Email',
                             hintStyle: TextStyle(
                               color: isDark ? Colors.grey.shade500 : Colors.grey.shade500,
                               fontWeight: FontWeight.w700,
@@ -323,7 +296,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
                       const SizedBox(height: 16),
 
-                      // Password Input Pill
+                      // Password Input
                       Container(
                         decoration: BoxDecoration(
                           color: isDark ? const Color(0xFF121E24) : const Color(0xFFF5F7F8),
@@ -369,32 +342,9 @@ class _LoginScreenState extends State<LoginScreen> {
                         ),
                       ),
 
-                      const SizedBox(height: 10),
+                      const SizedBox(height: 28),
 
-                      // Forgot Password Link
-                      if (!isSignUpMode)
-                        Align(
-                          alignment: Alignment.centerRight,
-                          child: TextButton(
-                            onPressed: () {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Password reset instructions sent!')),
-                              );
-                            },
-                            child: Text(
-                              'Forgot Password?',
-                              style: TextStyle(
-                                color: isDark ? AppTheme.primaryTeal : const Color(0xFF0F766E),
-                                fontWeight: FontWeight.w800,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ),
-                        ),
-
-                      const SizedBox(height: 16),
-
-                      // Action Button (Teal Gradient Pill)
+                      // Login Button
                       SizedBox(
                         width: double.infinity,
                         height: 52,
@@ -415,7 +365,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             ],
                           ),
                           child: ElevatedButton(
-                            onPressed: isLoading ? null : handleAuth,
+                            onPressed: isLoading ? null : handleLogin,
                             style: ElevatedButton.styleFrom(
                               backgroundColor: Colors.transparent,
                               shadowColor: Colors.transparent,
@@ -429,9 +379,9 @@ class _LoginScreenState extends State<LoginScreen> {
                                     height: 22,
                                     child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
                                   )
-                                : Text(
-                                    isSignUpMode ? 'Sign Up' : 'Login',
-                                    style: const TextStyle(
+                                : const Text(
+                                    'Login',
+                                    style: TextStyle(
                                       fontSize: 17,
                                       fontWeight: FontWeight.w900,
                                       color: Colors.white,
@@ -442,98 +392,27 @@ class _LoginScreenState extends State<LoginScreen> {
                         ),
                       ),
 
-                      const SizedBox(height: 24),
-
-                      // Divider "or continue with"
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Divider(
-                              color: isDark ? Colors.grey.shade700 : Colors.grey.shade300,
-                              thickness: 1,
-                            ),
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 12),
-                            child: Text(
-                              'or continue with',
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w700,
-                                color: isDark ? Colors.grey.shade400 : Colors.grey.shade500,
-                              ),
-                            ),
-                          ),
-                          Expanded(
-                            child: Divider(
-                              color: isDark ? Colors.grey.shade700 : Colors.grey.shade300,
-                              thickness: 1,
-                            ),
-                          ),
-                        ],
-                      ),
-
                       const SizedBox(height: 20),
 
-                      // Quick User Presets / Social Login Buttons
+                      // Private App Notice
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          // User 1 Button
-                          _buildSocialButton(
-                            label: 'User 1',
-                            color: const Color(0xFF0F766E),
-                            onTap: () => loginWithUserId(1),
+                          Icon(
+                            Icons.shield_rounded,
+                            size: 14,
+                            color: isDark ? Colors.grey.shade500 : Colors.grey.shade400,
                           ),
-                          const SizedBox(width: 16),
-
-                          // User 2 Button
-                          _buildSocialButton(
-                            label: 'User 2',
-                            color: const Color(0xFF149B9B),
-                            onTap: () => loginWithUserId(2),
-                          ),
-                          const SizedBox(width: 16),
-
-                          // Google Icon Button
-                          _buildSocialButton(
-                            label: 'G',
-                            color: const Color(0xFFEA4335),
-                            isGoogle: true,
-                            onTap: () => loginWithUserId(1),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Private. Invite only.',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: isDark ? Colors.grey.shade500 : Colors.grey.shade400,
+                            ),
                           ),
                         ],
-                      ),
-
-                      const SizedBox(height: 24),
-
-                      // Toggle Login vs Sign Up
-                      GestureDetector(
-                        onTap: () {
-                          setState(() {
-                            isSignUpMode = !isSignUpMode;
-                          });
-                        },
-                        child: RichText(
-                          text: TextSpan(
-                            text: isSignUpMode ? "Already have an account? " : "Don't have an account? ",
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w700,
-                              color: isDark ? Colors.grey.shade400 : Colors.grey.shade600,
-                            ),
-                            children: [
-                              TextSpan(
-                                text: isSignUpMode ? 'Login' : 'Sign Up',
-                                style: const TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w900,
-                                  color: AppTheme.primaryTeal,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
                       ),
                     ],
                   ),
@@ -563,48 +442,6 @@ class _LoginScreenState extends State<LoginScreen> {
         ],
       ),
       child: Icon(icon, color: color, size: 24),
-    );
-  }
-
-  Widget _buildSocialButton({
-    required String label,
-    required Color color,
-    bool isGoogle = false,
-    required VoidCallback onTap,
-  }) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 50,
-        height: 50,
-        decoration: BoxDecoration(
-          color: isDark ? const Color(0xFF121E24) : Colors.white,
-          shape: BoxShape.circle,
-          border: Border.all(
-            color: isDark ? Colors.grey.shade700 : Colors.grey.shade200,
-            width: 1.5,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.05),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Center(
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: isGoogle ? 20 : 12,
-              fontWeight: FontWeight.w900,
-              color: color,
-            ),
-          ),
-        ),
-      ),
     );
   }
 }

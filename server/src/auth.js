@@ -7,78 +7,13 @@ const { authenticateToken } = require("./middleware/authMiddleware");
 
 const router = express.Router();
 
-// REGISTER
-router.post("/register", async (req, res) => {
-  try {
-    const { name, email, password } = req.body;
+// ---------------------------------------------------------
+// REGISTRATION IS COMPLETELY DISABLED FOR DUOCHAT
+// DuoChat is a strict 2-user private application.
+// Credentials must be provided via the server's .env file.
+// ---------------------------------------------------------
 
-    if (!name || !email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: "Name, email and password are required",
-      });
-    }
-
-    // Private 2-User App Enforcement: Check total users count
-    const totalUsersCount = await pool.query("SELECT COUNT(*)::int AS count FROM users");
-    const count = parseInt(totalUsersCount.rows[0].count || 0, 10);
-
-    if (count >= 2) {
-      return res.status(403).json({
-        success: false,
-        message: "Registration disabled. DuoChat is a private 2-user application.",
-      });
-    }
-
-    const existingUser = await pool.query(
-      "SELECT id FROM users WHERE email = $1",
-      [email]
-    );
-
-    if (existingUser.rows.length > 0) {
-      return res.status(409).json({
-        success: false,
-        message: "Email already registered",
-      });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    const result = await pool.query(
-      `INSERT INTO users (name, email, password_hash)
-       VALUES ($1, $2, $3)
-       RETURNING id, name, email, created_at`,
-      [name, email, passwordHash]
-    );
-
-    const user = result.rows[0];
-
-    const token = jwt.sign(
-      {
-        userId: user.id,
-        email: user.email,
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
-
-    res.status(201).json({
-      success: true,
-      message: "Registration successful",
-      user,
-      token,
-    });
-  } catch (error) {
-    console.error("Register error:", error.message);
-
-    res.status(500).json({
-      success: false,
-      message: "Registration failed",
-    });
-  }
-});
-
-// LOGIN
+// LOGIN (Strict 2-User Authentication)
 router.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -91,60 +26,58 @@ router.post("/login", async (req, res) => {
     }
 
     const cleanEmail = email.trim().toLowerCase();
+    
+    const user1Email = (process.env.DUO_USER1_EMAIL || "").trim().toLowerCase();
+    const user2Email = (process.env.DUO_USER2_EMAIL || "").trim().toLowerCase();
 
-    // Map alternative emails for User 1 and User 2
+    // The backend must explicitly verify identity matching the .env secrets
     let targetId = null;
-    if (cleanEmail.includes("1") || cleanEmail.includes("test")) {
+    let targetName = "";
+
+    if (user1Email && cleanEmail === user1Email && password === process.env.DUO_USER1_PASSWORD) {
       targetId = 1;
-    } else if (cleanEmail.includes("2") || cleanEmail.includes("second")) {
+      targetName = "User 1";
+    } else if (user2Email && cleanEmail === user2Email && password === process.env.DUO_USER2_PASSWORD) {
       targetId = 2;
+      targetName = "User 2";
     }
 
-    let result;
-    if (targetId) {
-      result = await pool.query("SELECT * FROM users WHERE id = $1 OR LOWER(email) = $2", [targetId, cleanEmail]);
-    } else {
-      result = await pool.query("SELECT * FROM users WHERE LOWER(email) = $1", [cleanEmail]);
-    }
-
-    if (result.rows.length === 0) {
+    if (!targetId) {
+      console.warn(`[AUTH] Failed login attempt for email: ${cleanEmail}`);
+      // Obfuscated generic error response
       return res.status(401).json({
         success: false,
         message: "Invalid email or password",
       });
     }
 
-    const user = result.rows[0];
-
-    // Check password with bcrypt or allow test passwords (password123 / 123456)
-    let passwordMatch = await bcrypt.compare(password, user.password_hash);
-    if (!passwordMatch && (password === "password123" || password === "123456")) {
-      passwordMatch = true;
+    if (!process.env.JWT_SECRET) {
+      console.error("[AUTH ERROR] JWT_SECRET is missing from environment variables!");
+      return res.status(500).json({ success: false, message: "Internal server configuration error" });
     }
 
-    if (!passwordMatch) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid email or password",
-      });
-    }
+    // Fetch the actual name from the database (preserves user-edited names)
+    const userRow = await pool.query("SELECT name FROM users WHERE id = $1", [targetId]);
+    const actualName = userRow.rows[0]?.name || targetName;
 
     const token = jwt.sign(
       {
-        userId: user.id,
-        email: user.email,
+        userId: targetId,
+        email: cleanEmail,
       },
-      process.env.JWT_SECRET || "duochat_super_secret_key_2026",
+      process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
+
+    console.log(`[AUTH] Successful login for User ${targetId} (name: ${actualName})`);
 
     res.json({
       success: true,
       message: "Login successful",
       user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
+        id: targetId,
+        name: actualName,
+        email: cleanEmail,
       },
       token,
     });

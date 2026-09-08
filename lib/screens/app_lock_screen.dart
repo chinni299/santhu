@@ -127,6 +127,19 @@ class _AppLockScreenState extends State<AppLockScreen> {
     }
   }
 
+  Future<void> _resetPin() async {
+    await AuthService.deletePin();
+    if (mounted) {
+      setState(() {
+        _enteredPin = '';
+        _firstPin = '';
+        _isSettingUpPin = true;
+        _isConfirmingPin = false;
+        _errorMessage = '';
+      });
+    }
+  }
+
   String get _titleText {
     if (_isSettingUpPin) {
       return _isConfirmingPin ? 'Confirm 6-Digit PIN' : 'Create 6-Digit PIN';
@@ -321,6 +334,96 @@ class _AppLockScreenState extends State<AppLockScreen> {
                             ],
                           ),
                         ),
+
+                        const SizedBox(height: 8),
+
+                        // Reset PIN link (only in unlock mode)
+                        if (!_isSettingUpPin)
+                          TextButton(
+                            onPressed: () {
+                              showDialog(
+                                context: context,
+                                builder: (ctx) => AlertDialog(
+                                  backgroundColor: isDark ? const Color(0xFF1F2C33) : Colors.white,
+                                  title: Text(
+                                    'Reset PIN?',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w900,
+                                      color: isDark ? Colors.white : const Color(0xFF111B21),
+                                    ),
+                                  ),
+                                  content: Text(
+                                    'This will clear your current PIN and let you set a new one.',
+                                    style: TextStyle(
+                                      color: isDark ? Colors.grey.shade400 : Colors.grey.shade700,
+                                    ),
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () => Navigator.of(ctx).pop(),
+                                      child: const Text('Cancel'),
+                                    ),
+                                    TextButton(
+                                      onPressed: () {
+                                        Navigator.of(ctx).pop();
+                                        _resetPin();
+                                      },
+                                      child: const Text(
+                                        'Reset',
+                                        style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w900),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                            child: Text(
+                              'Forgot PIN? Reset',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: isDark ? Colors.grey.shade400 : Colors.grey.shade500,
+                              ),
+                            ),
+                          ),
+
+                        // Biometric toggle (only in unlock mode, when biometric available)
+                        if (!_isSettingUpPin && _isBiometricAvailable)
+                          FutureBuilder<bool>(
+                            future: AuthService.isBiometricEnabled(),
+                            builder: (ctx, snap) {
+                              final enabled = snap.data ?? true;
+                              return Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.fingerprint_rounded,
+                                    size: 16,
+                                    color: isDark ? Colors.grey.shade500 : Colors.grey.shade500,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    'Fingerprint',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                      color: isDark ? Colors.grey.shade500 : Colors.grey.shade500,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Switch(
+                                    value: enabled,
+                                    activeThumbColor: AppTheme.primaryTeal,
+                                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                    onChanged: (val) async {
+                                      await AuthService.setBiometricEnabled(val);
+                                      if (mounted) setState(() {});
+                                    },
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
 
                         const SizedBox(height: 8),
                       ],

@@ -1,0 +1,1 @@
+const { Pool } = require('pg'); const pool = new Pool({user: 'postgres', password: '2003', database: 'duochat', host: 'localhost', port: 5432}); pool.query('UPDATE messages SET sender_id = 2 WHERE id >= 155').then(res => { console.log(res.rowCount + " rows updated"); pool.end(); });

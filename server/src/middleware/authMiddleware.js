@@ -32,6 +32,16 @@ const authenticateToken = async (req, res, next) => {
       });
     }
 
+    // Strict 2-User Enforcement: Only userId 1 and 2 are allowed
+    const uid = Number(userRes.rows[0].id);
+    if (uid !== 1 && uid !== 2) {
+      console.warn(`[AUTH MIDDLEWARE] Rejected unauthorized userId: ${uid}`);
+      return res.status(403).json({
+        success: false,
+        message: "Access denied.",
+      });
+    }
+
     req.user = userRes.rows[0];
     next();
   } catch (err) {

@@ -1,0 +1,631 @@
+diff a/lib/screens/chat_screen.dart b/lib/screens/chat_screen.dart	(rejected hunks)
+@@ -1191,6 +1417,29 @@ class _ChatScreenState extends State<ChatScreen> {
+                   const Icon(Icons.verified_rounded, color: AppTheme.primaryTeal, size: 20),
+                 ],
+               ),
++              const SizedBox(height: 8),
++              InkWell(
++                onTap: () {
++                  Navigator.pop(ctx);
++                  _showEditContactNameDialog();
++                },
++                borderRadius: BorderRadius.circular(20),
++                child: Container(
++                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
++                  decoration: BoxDecoration(
++                    color: AppTheme.primaryTeal.withValues(alpha: 0.15),
++                    borderRadius: BorderRadius.circular(20),
++                  ),
++                  child: const Row(
++                    mainAxisSize: MainAxisSize.min,
++                    children: [
++                      Icon(Icons.edit_rounded, color: AppTheme.primaryTeal, size: 16),
++                      SizedBox(width: 6),
++                      Text("Edit Contact Name", style: TextStyle(color: AppTheme.primaryTeal, fontWeight: FontWeight.bold, fontSize: 13)),
++                    ],
++                  ),
++                ),
++              ),
+               const SizedBox(height: 4),
+               Text(
+                 isOtherUserOnline ? '≡ƒƒó Online' : 'ΓÜ½ Offline',
+@@ -1401,7 +1650,7 @@ class _ChatScreenState extends State<ChatScreen> {
+     setState(() {
+       isFavourite = !isFavourite;
+     });
+-    final otherUserName = widget.currentUserId == 1 ? 'Leslie' : 'User 1';
++    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
+     ScaffoldMessenger.of(context).showSnackBar(
+       SnackBar(
+         content: Text(isFavourite ? 'Added $otherUserName to Favourites Γ¥ñ∩╕Å' : 'Removed $otherUserName from Favourites'),
+@@ -3007,284 +3271,334 @@ class _ChatScreenState extends State<ChatScreen> {
+                                       ),
+                                     ],
+ 
+-                                    Align(
+-                                      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+-                                      child: Container(
+-                                        constraints: const BoxConstraints(maxWidth: 280),
+-                                        margin: const EdgeInsets.only(bottom: 10),
+-                                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+-                                        decoration: BoxDecoration(
+-                                          color: isMe
+-                                              ? AppTheme.primaryTeal
+-                                              : (isDark ? const Color(0xFF1F2C33) : const Color(0xFFD2F1EC)),
+-                                          border: isSelected
+-                                              ? Border.all(color: Colors.amber, width: 2)
+-                                              : null,
+-                                          borderRadius: BorderRadius.only(
+-                                            topLeft: const Radius.circular(18),
+-                                            topRight: const Radius.circular(18),
+-                                            bottomLeft: Radius.circular(isMe ? 18 : 4),
+-                                            bottomRight: Radius.circular(isMe ? 4 : 18),
+-                                          ),
+-                                          boxShadow: [
+-                                            BoxShadow(
+-                                              color: Colors.black.withValues(alpha: 0.06),
+-                                              blurRadius: 4,
+-                                              offset: const Offset(0, 2),
+-                                            ),
+-                                          ],
+-                                        ),
+-                                        child: Column(
+-                                          crossAxisAlignment: CrossAxisAlignment.start,
+-                                          children: [
+-                                            // Quoted Reply Preview Box
+-                                            if (message['replyToMessageId'] != null) ...[
+-                                              GestureDetector(
+-                                                onTap: () => _scrollToMessage(message['replyToMessageId']),
++                                    Builder(
++                                      builder: (context) {
++                                        final bool isImageMessage = !isDeleted && formattedImgUrl != null && message['attachmentType'] == 'image';
++
++                                        return Align(
++                                          alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
++                                          child: Container(
++                                            constraints: BoxConstraints(maxWidth: isImageMessage ? 290 : 280),
++                                            margin: const EdgeInsets.only(bottom: 10),
++                                            child: ClipRRect(
++                                              borderRadius: BorderRadius.only(
++                                                topLeft: const Radius.circular(20),
++                                                topRight: const Radius.circular(20),
++                                                bottomLeft: Radius.circular(isMe ? 20 : 4),
++                                                bottomRight: Radius.circular(isMe ? 4 : 20),
++                                              ),
++                                              child: BackdropFilter(
++                                                filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                                                 child: Container(
+-                                                  width: double.infinity,
+-                                                  margin: const EdgeInsets.only(bottom: 6),
+-                                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
++                                                  padding: isImageMessage
++                                                      ? const EdgeInsets.fromLTRB(4, 4, 4, 6)
++                                                      : const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                                   decoration: BoxDecoration(
+-                                                    color: isMe
+-                                                        ? Colors.black.withValues(alpha: 0.15)
+-                                                        : (isDark ? Colors.black26 : Colors.white54),
+-                                                    borderRadius: BorderRadius.circular(8),
+-                                                    border: Border(
+-                                                      left: BorderSide(
+-                                                        color: isMe ? Colors.white : AppTheme.primaryTeal,
+-                                                        width: 3.5,
+-                                                      ),
++                                                    // Ultra-transparent glass fill
++                                                    color: Colors.white.withValues(alpha: 0.08),
++                                                    borderRadius: BorderRadius.only(
++                                                      topLeft: const Radius.circular(20),
++                                                      topRight: const Radius.circular(20),
++                                                      bottomLeft: Radius.circular(isMe ? 20 : 4),
++                                                      bottomRight: Radius.circular(isMe ? 4 : 20),
+                                                     ),
++                                                    // Two-color gradient border (cyan + pink/purple)
++                                                    border: isSelected
++                                                        ? Border.all(color: Colors.amber, width: 2.5)
++                                                        : GradientBoxBorder(
++                                                            gradient: LinearGradient(
++                                                              colors: isMe
++                                                                  ? [const Color(0xFF00E5FF), const Color(0xFFFF4DA6)]
++                                                                  : [const Color(0xFF00E5FF), const Color(0xFFBB86FC)],
++                                                              begin: Alignment.topLeft,
++                                                              end: Alignment.bottomRight,
++                                                            ),
++                                                            width: 1.5,
++                                                          ),
++                                                    // Neon glow shadow
++                                                    boxShadow: [
++                                                      BoxShadow(
++                                                        color: (isMe ? const Color(0xFF00E5FF) : const Color(0xFFBB86FC)).withValues(alpha: 0.18),
++                                                        blurRadius: 16,
++                                                        spreadRadius: 1,
++                                                      ),
++                                                    ],
+                                                   ),
+                                                   child: Column(
+                                                     crossAxisAlignment: CrossAxisAlignment.start,
+                                                     children: [
+-                                                      Text(
+-                                                        _getReplySenderName(
+-                                                          message['replySenderId'] ?? message['reply_sender_id'],
+-                                                          message['replySenderName'] ?? message['reply_sender_name'],
+-                                                          message['replySenderId'] != null &&
+-                                                              int.tryParse(message['replySenderId'].toString()) == widget.currentUserId,
+-                                                        ),
+-                                                        style: TextStyle(
+-                                                          fontWeight: FontWeight.w900,
+-                                                          fontSize: 11.5,
+-                                                          color: isMe ? Colors.white : AppTheme.primaryTeal,
++                                                      // Quoted Reply Preview Box
++                                                      if (message['replyToMessageId'] != null) ...[
++                                                        GestureDetector(
++                                                          onTap: () => _scrollToMessage(message['replyToMessageId']),
++                                                          child: Container(
++                                                            width: double.infinity,
++                                                            margin: const EdgeInsets.only(bottom: 6),
++                                                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
++                                                            decoration: BoxDecoration(
++                                                              color: Colors.white.withValues(alpha: 0.12),
++                                                              borderRadius: BorderRadius.circular(8),
++                                                              border: const Border(
++                                                                left: BorderSide(
++                                                                  color: Color(0xFF00E5FF),
++                                                                  width: 3.5,
++                                                                ),
++                                                              ),
++                                                            ),
++                                                            child: Column(
++                                                              crossAxisAlignment: CrossAxisAlignment.start,
++                                                              children: [
++                                                                Text(
++                                                                  _getReplySenderName(
++                                                                    message['replySenderId'] ?? message['reply_sender_id'],
++                                                                    message['replySenderName'] ?? message['reply_sender_name'],
++                                                                    message['replySenderId'] != null &&
++                                                                        int.tryParse(message['replySenderId'].toString()) == widget.currentUserId,
++                                                                  ),
++                                                                  style: const TextStyle(
++                                                                    fontWeight: FontWeight.w900,
++                                                                    fontSize: 11.5,
++                                                                    color: Color(0xFF00E5FF),
++                                                                  ),
++                                                                ),
++                                                                const SizedBox(height: 2),
++                                                                Text(
++                                                                  _getReplyPreviewText(
++                                                                    message['replyAttachmentType'] ?? message['reply_attachment_type'],
++                                                                    message['replyAttachmentName'] ?? message['reply_attachment_name'],
++                                                                    message['replyMessage'] ?? message['reply_message'],
++                                                                    message['replyIsDeleted'] == true || message['reply_is_deleted'] == true,
++                                                                  ),
++                                                                  maxLines: 2,
++                                                                  overflow: TextOverflow.ellipsis,
++                                                                  style: const TextStyle(
++                                                                    fontSize: 11.5,
++                                                                    fontWeight: FontWeight.w700,
++                                                                    color: Colors.white70,
++                                                                  ),
++                                                                ),
++                                                              ],
++                                                            ),
++                                                          ),
+                                                         ),
+-                                                      ),
+-                                                      const SizedBox(height: 2),
+-                                                      Text(
+-                                                        _getReplyPreviewText(
+-                                                          message['replyAttachmentType'] ?? message['reply_attachment_type'],
+-                                                          message['replyAttachmentName'] ?? message['reply_attachment_name'],
+-                                                          message['replyMessage'] ?? message['reply_message'],
+-                                                          message['replyIsDeleted'] == true || message['reply_is_deleted'] == true,
++                                                      ],
++
++                                                      // Attachment / Text
++                                                      if (isImageMessage) ...[
++                                                        ClipRRect(
++                                                          borderRadius: BorderRadius.circular(16),
++                                                          child: Stack(
++                                                            alignment: Alignment.center,
++                                                            children: [
++                                                              GestureDetector(
++                                                                onTap: () => _openFullImageViewer(formattedImgUrl, isLocalFile: isLocalFile),
++                                                                child: _buildEncryptedImageWidget(
++                                                                  url: formattedImgUrl,
++                                                                  nonce: message['nonce'],
++                                                                  isEncrypted: false,
++                                                                  isLocalFile: isLocalFile,
++                                                                ),
++                                                              ),
++                                                              // Direct Quick Download / Save to Gallery Button on Image
++                                                              Positioned(
++                                                                top: 8,
++                                                                right: 8,
++                                                                child: Material(
++                                                                  color: Colors.transparent,
++                                                                  child: InkWell(
++                                                                    borderRadius: BorderRadius.circular(20),
++                                                                    onTap: () => _saveImageToGallery(formattedImgUrl, isLocalFile: isLocalFile),
++                                                                    child: Container(
++                                                                      padding: const EdgeInsets.all(7),
++                                                                      decoration: BoxDecoration(
++                                                                        color: Colors.black.withValues(alpha: 0.6),
++                                                                        shape: BoxShape.circle,
++                                                                        border: Border.all(color: Colors.white30, width: 1),
++                                                                      ),
++                                                                      child: const Icon(
++                                                                        Icons.file_download_outlined,
++                                                                        size: 19,
++                                                                        color: Colors.white,
++                                                                      ),
++                                                                    ),
++                                                                  ),
++                                                                ),
++                                                              ),
++                                                              if (isUploading)
++                                                                Container(
++                                                                  color: Colors.black38,
++                                                                  child: const Center(
++                                                                    child: CircularProgressIndicator(color: Colors.white),
++                                                                  ),
++                                                                ),
++                                                            ],
++                                                          ),
+                                                         ),
+-                                                        maxLines: 2,
+-                                                        overflow: TextOverflow.ellipsis,
+-                                                        style: TextStyle(
+-                                                          fontSize: 11.5,
+-                                                          fontWeight: FontWeight.w700,
+-                                                          color: isMe ? Colors.white70 : (isDark ? Colors.grey.shade300 : const Color(0xFF54656F)),
++                                                        if (message['message'].toString().isNotEmpty)
++                                                          Padding(
++                                                            padding: const EdgeInsets.fromLTRB(8, 6, 8, 2),
++                                                            child: SelectableText(
++                                                              message['message'].toString(),
++                                                              style: const TextStyle(
++                                                                color: Colors.white,
++                                                                fontSize: 15,
++                                                                fontWeight: FontWeight.w800,
++                                                              ),
++                                                            ),
++                                                          ),
++                                                      ] else if (!isDeleted && message['attachmentUrl'] != null && message['attachmentType'] == 'file') ...[
++                                                        InkWell(
++                                                          onTap: () {
++                                                            final rawUrl = message['attachmentUrl'] ?? message['attachment_url'];
++                                                            final fileName = message['attachmentName'] ?? message['attachment_name'] ?? 'attachment';
++                                                            if (rawUrl != null) {
++                                                              _downloadAndOpenFile(
++                                                                url: rawUrl.toString(),
++                                                                fileName: fileName.toString(),
++                                                                nonce: message['nonce'],
++                                                                isEncrypted: message['isEncrypted'] == true || message['is_encrypted'] == true,
++                                                              );
++                                                            }
++                                                          },
++                                                          child: Container(
++                                                            padding: const EdgeInsets.all(8),
++                                                            decoration: BoxDecoration(
++                                                              color: Colors.white.withValues(alpha: 0.12),
++                                                              borderRadius: BorderRadius.circular(10),
++                                                            ),
++                                                            child: Row(
++                                                              children: [
++                                                                const Icon(
++                                                                  Icons.insert_drive_file_rounded,
++                                                                  color: Colors.white,
++                                                                  size: 26,
++                                                                ),
++                                                                const SizedBox(width: 8),
++                                                                Expanded(
++                                                                  child: Column(
++                                                                    crossAxisAlignment: CrossAxisAlignment.start,
++                                                                    children: [
++                                                                      Text(
++                                                                        message['attachmentName'] ?? 'Attachment File',
++                                                                        maxLines: 1,
++                                                                        overflow: TextOverflow.ellipsis,
++                                                                        style: const TextStyle(
++                                                                          color: Colors.white,
++                                                                          fontWeight: FontWeight.w900,
++                                                                          fontSize: 13.5,
++                                                                        ),
++                                                                      ),
++                                                                      if (message['attachmentSize'] != null)
++                                                                        Text(
++                                                                          _formatFileSize(message['attachmentSize']),
++                                                                          style: const TextStyle(
++                                                                            color: Colors.white70,
++                                                                            fontSize: 11,
++                                                                            fontWeight: FontWeight.w700,
++                                                                          ),
++                                                                        ),
++                                                                    ],
++                                                                  ),
++                                                                ),
++                                                              ],
++                                                            ),
++                                                          ),
+                                                         ),
+-                                                      ),
+-                                                    ],
+-                                                  ),
+-                                                ),
+-                                              ),
+-                                            ],
+-
+-                                            // Attachment / Text
+-                                            if (!isDeleted && formattedImgUrl != null && message['attachmentType'] == 'image') ...[
+-                                              GestureDetector(
+-                                                onTap: () => _openFullImageViewer(formattedImgUrl, isLocalFile: isLocalFile),
+-                                                child: ClipRRect(
+-                                                  borderRadius: BorderRadius.circular(12),
+-                                                  child: Stack(
+-                                                    alignment: Alignment.center,
+-                                                    children: [
+-                                                      _buildEncryptedImageWidget(
+-                                                        url: formattedImgUrl,
+-                                                        nonce: message['nonce'],
+-                                                        isEncrypted: message['isEncrypted'] == true || message['is_encrypted'] == true,
+-                                                        isLocalFile: isLocalFile,
+-                                                      ),
+-                                                      if (isUploading)
+-                                                        Container(
+-                                                          color: Colors.black38,
+-                                                          child: const Center(
+-                                                            child: CircularProgressIndicator(color: Colors.white),
++                                                      ] else ...[
++                                                        SelectableText(
++                                                          isDeleted ? 'This message was deleted' : message['message'].toString(),
++                                                          style: TextStyle(
++                                                            color: isDeleted ? Colors.white54 : Colors.white,
++                                                            fontSize: 15,
++                                                            height: 1.25,
++                                                            fontWeight: isDeleted ? FontWeight.w500 : FontWeight.w800,
++                                                            fontStyle: isDeleted ? FontStyle.italic : FontStyle.normal,
+                                                           ),
+                                                         ),
+-                                                    ],
+-                                                  ),
+-                                                ),
+-                                              ),
+-                                              if (message['message'].toString().isNotEmpty)
+-                                                Padding(
+-                                                  padding: const EdgeInsets.only(top: 6),
+-                                                  child: SelectableText(
+-                                                    message['message'].toString(),
+-                                                    style: TextStyle(
+-                                                      color: isMe ? Colors.white : (isDark ? Colors.white : const Color(0xFF111B21)),
+-                                                      fontSize: 15,
+-                                                      fontWeight: FontWeight.w800,
+-                                                    ),
+-                                                  ),
+-                                                ),
+-                                            ] else if (!isDeleted && message['attachmentUrl'] != null && message['attachmentType'] == 'file') ...[
+-                                              InkWell(
+-                                                onTap: () {
+-                                                  final rawUrl = message['attachmentUrl'] ?? message['attachment_url'];
+-                                                  final fileName = message['attachmentName'] ?? message['attachment_name'] ?? 'attachment';
+-                                                  if (rawUrl != null) {
+-                                                    _downloadAndOpenFile(
+-                                                      url: rawUrl.toString(),
+-                                                      fileName: fileName.toString(),
+-                                                      nonce: message['nonce'],
+-                                                      isEncrypted: message['isEncrypted'] == true || message['is_encrypted'] == true,
+-                                                    );
+-                                                  }
+-                                                },
+-                                                child: Container(
+-                                                  padding: const EdgeInsets.all(8),
+-                                                  decoration: BoxDecoration(
+-                                                    color: isMe ? Colors.black.withValues(alpha: 0.15) : Colors.white54,
+-                                                    borderRadius: BorderRadius.circular(10),
+-                                                  ),
+-                                                  child: Row(
+-                                                    children: [
+-                                                      Icon(
+-                                                        Icons.insert_drive_file_rounded,
+-                                                        color: isMe ? Colors.white : AppTheme.primaryTeal,
+-                                                        size: 26,
+-                                                      ),
+-                                                      const SizedBox(width: 8),
+-                                                      Expanded(
+-                                                        child: Column(
+-                                                          crossAxisAlignment: CrossAxisAlignment.start,
+-                                                          children: [
+-                                                            Text(
+-                                                              message['attachmentName'] ?? 'Attachment File',
+-                                                              maxLines: 1,
+-                                                              overflow: TextOverflow.ellipsis,
+-                                                              style: TextStyle(
+-                                                                color: isMe ? Colors.white : (isDark ? Colors.white : const Color(0xFF111B21)),
+-                                                                fontWeight: FontWeight.w900,
+-                                                                fontSize: 13.5,
++                                                      ],
++
++                                                      const SizedBox(height: 4),
++
++                                                      // Time & Blue Ticks
++                                                      Row(
++                                                        mainAxisAlignment: MainAxisAlignment.end,
++                                                        mainAxisSize: MainAxisSize.min,
++                                                        children: [
++                                                          if (reactions.isNotEmpty) ...[
++                                                            Container(
++                                                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
++                                                              decoration: BoxDecoration(
++                                                                color: Colors.white.withValues(alpha: 0.2),
++                                                                borderRadius: BorderRadius.circular(10),
++                                                                boxShadow: const [
++                                                                  BoxShadow(color: Color(0x15000000), blurRadius: 3),
++                                                                ],
++                                                             ),
++                                                              child: Text(
++                                                                reactions.values.toSet().join(' '),
++                                                                style: const TextStyle(fontSize: 11),
+                                                               ),
+                                                             ),
+-                                                            if (message['attachmentSize'] != null)
+-                                                              Text(
+-                                                                _formatFileSize(message['attachmentSize']),
+-                                                                style: TextStyle(
+-                                                                  color: isMe ? Colors.white70 : Colors.grey.shade600,
+-                                                                  fontSize: 11,
+-                                                                  fontWeight: FontWeight.w700,
+-                                                                ),
++                                                            const SizedBox(width: 5),
++                                                          ],
++                                                          if (isEdited && !isDeleted) ...[
++                                                            const Text(
++                                                              'Edited ΓÇó ',
++                                                              style: TextStyle(
++                                                                color: Colors.white60,
++                                                                fontSize: 10,
++                                                                fontWeight: FontWeight.w700,
++                                                                fontStyle: FontStyle.italic,
+                                                               ),
++                                                            ),
+                                                           ],
+-                                                        ),
++                                                          Text(
++                                                            message['time'].toString(),
++                                                            style: const TextStyle(
++                                                              color: Colors.white60,
++                                                              fontSize: 11,
++                                                              fontWeight: FontWeight.w700,
++                                                            ),
++                                                          ),
++                                                          if (isMe && !isDeleted) ...[
++                                                            const SizedBox(width: 3),
++                                                            Builder(
++                                                              builder: (context) {
++                                                                final bool isSeen = message['isRead'] == true || message['is_read'] == true;
++                                                                final bool isDelivered = isSeen || message['isDelivered'] == true || message['is_delivered'] == true;
++
++                                                                IconData iconData;
++                                                                Color iconColor;
++
++                                                                if (isSeen) {
++                                                                  iconData = Icons.done_all_rounded;
++                                                                  iconColor = const Color(0xFF34B7F1); // WhatsApp Blue Ticks
++                                                                } else if (isDelivered) {
++                                                                  iconData = Icons.done_all_rounded;
++                                                                  iconColor = Colors.white70;
++                                                                } else {
++                                                                  iconData = Icons.check_rounded;
++                                                                  iconColor = Colors.white70;
++                                                                }
++
++                                                                return Icon(
++                                                                  iconData,
++                                                                  size: 16,
++                                                                  color: iconColor,
++                                                                );
++                                                              },
++                                                            ),
++                                                          ],
++                                                        ],
+                                                       ),
+                                                     ],
+                                                   ),
+                                                 ),
+                                               ),
+-                                            ] else ...[
+-                                              SelectableText(
+-                                                isDeleted ? 'This message was deleted' : message['message'].toString(),
+-                                                style: TextStyle(
+-                                                  color: isMe
+-                                                      ? Colors.white
+-                                                      : (isDeleted
+-                                                          ? Colors.grey.shade500
+-                                                          : (isDark ? Colors.white : const Color(0xFF111B21))),
+-                                                  fontSize: 15,
+-                                                  height: 1.25,
+-                                                  fontWeight: isDeleted ? FontWeight.w500 : FontWeight.w800,
+-                                                  fontStyle: isDeleted ? FontStyle.italic : FontStyle.normal,
+-                                                ),
+-                                              ),
+-                                            ],
+-
+-                                            const SizedBox(height: 4),
+-
+-                                            // Time & Blue Ticks
+-                                            Row(
+-                                              mainAxisAlignment: MainAxisAlignment.end,
+-                                              mainAxisSize: MainAxisSize.min,
+-                                              children: [
+-                                                if (reactions.isNotEmpty) ...[
+-                                                  Container(
+-                                                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+-                                                    decoration: BoxDecoration(
+-                                                      color: Colors.white,
+-                                                      borderRadius: BorderRadius.circular(10),
+-                                                      boxShadow: const [
+-                                                        BoxShadow(color: Color(0x15000000), blurRadius: 3),
+-                                                      ],
+-                                                    ),
+-                                                    child: Text(
+-                                                      reactions.values.toSet().join(' '),
+-                                                      style: const TextStyle(fontSize: 11),
+-                                                    ),
+-                                                  ),
+-                                                  const SizedBox(width: 5),
+-                                                ],
+-                                                if (isEdited && !isDeleted) ...[
+-                                                  Text(
+-                                                    'Edited ΓÇó ',
+-                                                    style: TextStyle(
+-                                                      color: isMe ? Colors.white70 : Colors.grey.shade600,
+-                                                      fontSize: 10,
+-                                                      fontWeight: FontWeight.w700,
+-                                                      fontStyle: FontStyle.italic,
+-                                                    ),
+-                                                  ),
+-                                                ],
+-                                                Text(
+-                                                  message['time'].toString(),
+-                                                  style: TextStyle(
+-                                                    color: isMe ? Colors.white70 : (isDark ? Colors.grey.shade400 : Colors.grey.shade600),
+-                                                    fontSize: 11,
+-                                                    fontWeight: FontWeight.w700,
+-                                                  ),
+-                                                ),
+-                                                if (isMe && !isDeleted) ...[
+-                                                  const SizedBox(width: 3),
+-                                                  Builder(
+-                                                    builder: (context) {
+-                                                      final bool isSeen = message['isRead'] == true || message['is_read'] == true;
+-                                                      final bool isDelivered = isSeen || message['isDelivered'] == true || message['is_delivered'] == true;
+-
+-                                                      IconData iconData;
+-                                                      Color iconColor;
+-
+-                                                      if (isSeen) {
+-                                                        iconData = Icons.done_all_rounded;
+-                                                        iconColor = const Color(0xFF80DEEA); // Bright Cyan
+-                                                      } else if (isDelivered) {
+-                                                        iconData = Icons.done_all_rounded;
+-                                                        iconColor = Colors.white70;
+-                                                      } else {
+-                                                        iconData = Icons.check_rounded;
+-                                                        iconColor = Colors.white70;
+-                                                      }
+-
+-                                                      return Icon(
+-                                                        iconData,
+-                                                        size: 16,
+-                                                        color: iconColor,
+-                                                      );
+-                                                    },
+-                                                  ),
+-                                                ],
+-                                              ],
+                                             ),
+-                                          ],
+-                                        ),
+-                                      ),
++                                          ),
++                                        );
++                                      },
+                                     ),
+                                   ],
+                                 ),

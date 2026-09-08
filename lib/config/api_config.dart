@@ -2,7 +2,7 @@ import 'package:flutter/foundation.dart';
 
 class ApiConfig {
   // Current active local IP address for physical devices on your Wi-Fi network
-  static const String localIp = '10.94.54.53';
+  static const String localIp = '192.168.0.116';
   static const String port = '5000';
 
   static String get baseUrl {
