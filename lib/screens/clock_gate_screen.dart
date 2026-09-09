@@ -39,7 +39,7 @@ class _ClockGateScreenState extends State<ClockGateScreen> with SingleTickerProv
 
     _pulseController = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 5), // 5 seconds continuous press
+      duration: const Duration(milliseconds: 2500),
     );
 
     _pulseController.addStatusListener((status) {
@@ -69,8 +69,7 @@ class _ClockGateScreenState extends State<ClockGateScreen> with SingleTickerProv
     HapticFeedback.lightImpact();
     _pulseController.forward(from: 0.0);
 
-    // Require holding for 5 FULL SECONDS before opening secret password screen
-    _holdTimer = Timer(const Duration(seconds: 5), () {
+    _holdTimer = Timer(const Duration(milliseconds: 2500), () {
       if (mounted) {
         HapticFeedback.heavyImpact();
         _pulseController.reset();
