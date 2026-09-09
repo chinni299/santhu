@@ -2,10 +2,11 @@
   "name": "duochat-root",
   "version": "1.0.0",
   "description": "DuoChat Monorepo Root for Render Deployment",
+  "main": "server/src/server.js",
   "scripts": {
     "postinstall": "cd server && npm install",
     "build": "cd server && npm install",
-    "start": "cd server && npm start"
+    "start": "node server/src/server.js"
   },
   "engines": {
     "node": ">=18.0.0"
