@@ -1,6 +1,6 @@
 require('dotenv').config();
 
-const baseUrl = 'https://santhu-qkn9.onrender.com';
+const baseUrl = 'https://santhu-swuo.onrender.com';
 
 async function testApi() {
   console.log('🧪 Testing Live Backend Endpoints:', baseUrl);
