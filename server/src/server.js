@@ -977,8 +977,9 @@ async function enforcePrivateTwoUserApp() {
   console.log("[DB SEED] Setup complete.");
 }
 
-enforcePrivateTwoUserApp().then(() => {
-  server.listen(PORT, () => {
-    console.log(`DuoChat server running on port ${PORT}`);
+server.listen(PORT, () => {
+  console.log(`DuoChat server running on port ${PORT}`);
+  enforcePrivateTwoUserApp().catch(err => {
+    console.error("[DB SEED] Unhandled seed error:", err.message);
   });
 });
