@@ -294,6 +294,7 @@ router.get("/conversations/:userId", async (req, res) => {
         other_u.id AS other_user_id,
         other_u.name AS other_user_name,
         other_u.email AS other_user_email,
+        other_u.avatar_url AS other_user_avatar,
         CASE 
           WHEN latest_m.is_deleted = true THEN 'This message was deleted' 
           WHEN latest_m.attachment_type = 'image' THEN '📷 Photo'
@@ -335,6 +336,7 @@ router.get("/conversations/:userId", async (req, res) => {
           other_u.id AS other_user_id,
           other_u.name AS other_user_name,
           other_u.email AS other_user_email,
+          other_u.avatar_url AS other_user_avatar,
           CASE 
             WHEN latest_m.is_deleted = true THEN 'This message was deleted' 
             WHEN latest_m.attachment_type = 'image' THEN '📷 Photo'
@@ -467,7 +469,13 @@ router.post("/upload", uploadSingleFile, async (req, res) => {
 
     const hostIp = req.headers.host || "localhost:5000";
     const attachmentUrl = `http://${hostIp}/messages/attachments/file/${file.filename}`;
-    const originalName = path.basename(file.originalname).replace(/[\0\r\n]/g, "");
+    
+    // Fix multer latin1 charset bug for UTF-8 / Emoji / Unicode filenames
+    let rawOriginalName = file.originalname;
+    try {
+      rawOriginalName = Buffer.from(file.originalname, "latin1").toString("utf8");
+    } catch (_) {}
+    const originalName = path.basename(rawOriginalName).replace(/[\0\r\n]/g, "");
     const fileSize = file.size;
 
     const result = await pool.query(

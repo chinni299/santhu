@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
@@ -24,6 +25,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
   bool _isLoading = true;
   bool _notificationsEnabled = true;
   File? _avatarFile;
+  Uint8List? _avatarBytes;
+  String? _avatarUrl;
 
   @override
   void initState() {
@@ -33,9 +36,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Future<void> _loadProfile() async {
     final user = await AuthService.getUser();
+    final localAvatar = await AuthService.getAvatarPath(widget.currentUserId);
     File? avatarFile;
-    if (user['avatar_path'] != null && user['avatar_path'].toString().isNotEmpty) {
-      final f = File(user['avatar_path'].toString());
+    if (!kIsWeb && localAvatar != null && localAvatar.isNotEmpty) {
+      final f = File(localAvatar);
       if (f.existsSync()) {
         avatarFile = f;
       }
@@ -50,6 +54,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               'email': widget.currentUserId == 1 ? 'user1@example.com' : 'user2@example.com',
             };
       _avatarFile = avatarFile;
+      _avatarUrl = user['avatar_url'] ?? AuthService.getAvatarUrl(widget.currentUserId);
       _isLoading = false;
     });
   }
@@ -58,19 +63,52 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final picker = ImagePicker();
     final image = await picker.pickImage(source: ImageSource.gallery);
     if (image != null) {
+      final bytes = await image.readAsBytes();
       setState(() {
-        _avatarFile = File(image.path);
+        _avatarBytes = bytes;
+        if (!kIsWeb) {
+          _avatarFile = File(image.path);
+        }
       });
-      await AuthService.updateUserProfile({'avatar_path': image.path});
+
+      final uploadedUrl = await AuthService.uploadAvatar(
+        userId: widget.currentUserId,
+        bytes: bytes,
+        filename: image.name,
+        localFilePath: image.path,
+      );
+
+      if (uploadedUrl != null) {
+        setState(() {
+          _avatarUrl = uploadedUrl;
+        });
+      }
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text("Profile picture updated successfully!"),
+            content: Text("Profile picture updated successfully! ✅"),
             backgroundColor: AppTheme.primaryTeal,
           ),
         );
       }
     }
+  }
+
+  Widget _buildLetterAvatar(String userName) {
+    return Container(
+      color: AppTheme.primaryTeal.withValues(alpha: 0.15),
+      child: Center(
+        child: Text(
+          userName.isNotEmpty ? userName[0].toUpperCase() : 'U',
+          style: const TextStyle(
+            fontSize: 46,
+            fontWeight: FontWeight.w900,
+            color: AppTheme.primaryTeal,
+          ),
+        ),
+      ),
+    );
   }
 
   void _showChangePinDialog() {
@@ -100,7 +138,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     const Text(
-                      "Set or update your 6-digit security PIN used to unlock DuoChat.",
+                      "Set or update your 6-digit security PIN used to unlock Clock.",
                       style: TextStyle(fontSize: 13, color: Colors.grey),
                     ),
                     const SizedBox(height: 16),
@@ -256,7 +294,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   void _showAddressDialog() {
     final addressController = TextEditingController(
-      text: _userData['address'] ?? "123 Security Blvd, DuoChat Encrypted Zone",
+      text: _userData['address'] ?? "123 Security Blvd, Clock Encrypted Zone",
     );
     showDialog(
       context: context,
@@ -416,21 +454,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             ),
                           ),
                           child: ClipOval(
-                            child: _avatarFile != null
-                                ? Image.file(_avatarFile!, fit: BoxFit.cover)
-                                : Container(
-                                    color: AppTheme.primaryTeal.withValues(alpha: 0.15),
-                                    child: Center(
-                                      child: Text(
-                                        userName.isNotEmpty ? userName[0].toUpperCase() : 'U',
-                                        style: const TextStyle(
-                                          fontSize: 46,
-                                          fontWeight: FontWeight.w900,
-                                          color: AppTheme.primaryTeal,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
+                            child: Builder(
+                              builder: (context) {
+                                if (_avatarBytes != null) {
+                                  return Image.memory(_avatarBytes!, fit: BoxFit.cover, width: 120, height: 120);
+                                }
+                                if (_avatarFile != null && !kIsWeb && _avatarFile!.existsSync()) {
+                                  return Image.file(_avatarFile!, fit: BoxFit.cover, width: 120, height: 120);
+                                }
+                                if (_avatarUrl != null && _avatarUrl!.isNotEmpty) {
+                                  return Image.network(
+                                    _avatarUrl!,
+                                    fit: BoxFit.cover,
+                                    width: 120,
+                                    height: 120,
+                                    errorBuilder: (_, _, _) => _buildLetterAvatar(userName),
+                                  );
+                                }
+                                return _buildLetterAvatar(userName);
+                              },
+                            ),
                           ),
                         ),
                         Positioned(

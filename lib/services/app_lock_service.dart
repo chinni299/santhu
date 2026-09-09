@@ -51,7 +51,7 @@ class AppLockService {
 
     try {
       final authenticated = await _localAuth.authenticate(
-        localizedReason: 'Unlock DuoChat to view private messages',
+        localizedReason: 'Unlock Clock to view private messages',
       );
       if (authenticated) {
         unlockApp();

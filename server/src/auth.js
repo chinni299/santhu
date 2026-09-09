@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
@@ -26,24 +27,27 @@ router.post("/login", async (req, res) => {
     }
 
     const cleanEmail = email.trim().toLowerCase();
+    const cleanPassword = (password || "").trim();
     
     const user1Email = (process.env.DUO_USER1_EMAIL || "").trim().toLowerCase();
     const user2Email = (process.env.DUO_USER2_EMAIL || "").trim().toLowerCase();
+    const user1Pass = (process.env.DUO_USER1_PASSWORD || "").trim();
+    const user2Pass = (process.env.DUO_USER2_PASSWORD || "").trim();
 
     // The backend must explicitly verify identity matching the .env secrets
     let targetId = null;
     let targetName = "";
 
-    if (user1Email && cleanEmail === user1Email && password === process.env.DUO_USER1_PASSWORD) {
+    if (user1Email && cleanEmail === user1Email && cleanPassword === user1Pass) {
       targetId = 1;
       targetName = "User 1";
-    } else if (user2Email && cleanEmail === user2Email && password === process.env.DUO_USER2_PASSWORD) {
+    } else if (user2Email && cleanEmail === user2Email && cleanPassword === user2Pass) {
       targetId = 2;
       targetName = "User 2";
     }
 
     if (!targetId) {
-      console.warn(`[AUTH] Failed login attempt for email: ${cleanEmail}`);
+      console.warn(`[AUTH] Failed login attempt for email: "${cleanEmail}" (pass len: ${cleanPassword.length}). Expected User1: "${user1Email}" (pass len: ${user1Pass.length}), User2: "${user2Email}" (pass len: ${user2Pass.length})`);
       // Obfuscated generic error response
       return res.status(401).json({
         success: false,
@@ -255,6 +259,196 @@ router.get("/safety-number/:conversationId", authenticateToken, async (req, res)
   } catch (error) {
     console.error("Compute safety number error:", error.message);
     res.status(500).json({ success: false, message: "Failed to compute safety number" });
+  }
+});
+
+// AVATAR UPLOAD STORAGE & CONFIG
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
+const crypto = require("crypto");
+
+const uploadsDir = path.join(__dirname, "../uploads");
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+const avatarStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadsDir);
+  },
+  filename: (req, file, cb) => {
+    const originalExt = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, "") || ".jpg";
+    const uniqueFilename = `avatar_${req.user?.userId || req.user?.id || Date.now()}_${crypto.randomUUID()}${originalExt}`;
+    cb(null, uniqueFilename);
+  },
+});
+
+const avatarUpload = multer({
+  storage: avatarStorage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB limit
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if ([".jpg", ".jpeg", ".png", ".webp", ".gif"].includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only image files are allowed for avatars"), false);
+    }
+  },
+});
+
+// UPLOAD USER AVATAR (Requires JWT Authentication)
+router.post("/avatar", authenticateToken, (req, res) => {
+  avatarUpload.single("avatar")(req, res, async (err) => {
+    if (err) {
+      return res.status(400).json({ success: false, message: err.message || "Avatar upload failed" });
+    }
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "No avatar image provided" });
+    }
+
+    try {
+      const authUserId = req.user?.userId || req.user?.id;
+      const avatarFilename = req.file.filename;
+      const avatarUrl = `/auth/avatar/${authUserId}?t=${Date.now()}`;
+
+      await pool.query(
+        "UPDATE users SET avatar_url = $1 WHERE id = $2",
+        [avatarFilename, authUserId]
+      );
+
+      console.log(`[AVATAR] Uploaded and saved avatar for user ${authUserId}: ${avatarFilename} ✅`);
+
+      res.json({
+        success: true,
+        message: "Avatar uploaded successfully",
+        avatar_url: avatarUrl,
+        filename: avatarFilename,
+      });
+    } catch (error) {
+      console.error("Save avatar error:", error.message);
+      res.status(500).json({ success: false, message: "Failed to save avatar" });
+    }
+  });
+});
+
+// GET USER AVATAR (Serves image file directly)
+router.get("/avatar/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const userRes = await pool.query(
+      "SELECT avatar_url FROM users WHERE id = $1",
+      [userId]
+    );
+
+    if (userRes.rows.length === 0 || !userRes.rows[0].avatar_url) {
+      return res.status(404).json({ success: false, message: "No avatar set" });
+    }
+
+    const storedVal = userRes.rows[0].avatar_url;
+    const safeFilename = path.basename(storedVal).replace(/[^a-zA-Z0-9.\-_]/g, "");
+    const filePath = path.join(uploadsDir, safeFilename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, message: "Avatar file not found on disk" });
+    }
+
+    const ext = path.extname(safeFilename).toLowerCase();
+    const mimeTypes = {
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".png": "image/png",
+      ".webp": "image/webp",
+      ".gif": "image/gif",
+    };
+
+    res.setHeader("Content-Type", mimeTypes[ext] || "image/jpeg");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    const stream = fs.createReadStream(filePath);
+    stream.pipe(res);
+  } catch (error) {
+    console.error("Get avatar error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to retrieve avatar" });
+  }
+});
+
+// GET USER PROFILE
+router.get("/profile/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const userRes = await pool.query(
+      "SELECT id, name, email, avatar_url, status, is_online, last_seen_at FROM users WHERE id = $1",
+      [userId]
+    );
+
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const user = userRes.rows[0];
+    if (user.avatar_url) {
+      user.avatar_url = `/auth/avatar/${user.id}`;
+    }
+
+    res.json({
+      success: true,
+      user,
+    });
+  } catch (error) {
+    console.error("Get profile error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to fetch profile" });
+  }
+});
+
+// UPDATE USER PROFILE
+router.put("/profile", authenticateToken, async (req, res) => {
+  try {
+    const authUserId = req.user?.userId || req.user?.id;
+    const { name, status, avatar_url } = req.body;
+
+    if (!authUserId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const updates = [];
+    const values = [];
+    let paramIndex = 1;
+
+    if (name !== undefined && name !== null && name.trim().length > 0) {
+      updates.push(`name = $${paramIndex++}`);
+      values.push(name.trim());
+    }
+
+    if (status !== undefined && status !== null) {
+      updates.push(`status = $${paramIndex++}`);
+      values.push(status.trim());
+    }
+
+    if (avatar_url !== undefined && avatar_url !== null) {
+      updates.push(`avatar_url = $${paramIndex++}`);
+      values.push(avatar_url.trim());
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ success: false, message: "No profile fields to update" });
+    }
+
+    values.push(authUserId);
+    const query = `UPDATE users SET ${updates.join(", ")} WHERE id = $${paramIndex} RETURNING id, name, email, avatar_url, status, is_online, last_seen_at`;
+    
+    const result = await pool.query(query, values);
+    const updatedUser = result.rows[0];
+
+    console.log(`[PROFILE] Updated profile for user ${authUserId}: name="${updatedUser.name}", avatar_url=${updatedUser.avatar_url ? 'SET' : 'NONE'}`);
+
+    res.json({
+      success: true,
+      message: "Profile updated successfully",
+      user: updatedUser,
+    });
+  } catch (error) {
+    console.error("Update profile error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to update profile" });
   }
 });
 

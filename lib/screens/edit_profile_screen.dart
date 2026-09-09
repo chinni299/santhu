@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import '../services/auth_service.dart';
@@ -27,7 +28,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
   bool _isLoading = true;
   File? _avatarFile;
+  Uint8List? _avatarBytes;
   String? _avatarPath;
+  String? _avatarUrl;
+  String? _avatarFilename;
 
   @override
   void initState() {
@@ -53,21 +57,24 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     final gender = user['gender'] ?? 'Male';
     final phone = user['phone'] ?? '+44 1632 960860';
     final email = user['email'] ?? defaultEmail;
-    final savedAvatar = user['avatar_path'];
+    final savedAvatar = await AuthService.getAvatarPath(widget.currentUserId) ?? user['avatar_path'];
 
     setState(() {
       _nameController.text = name;
       _usernameController.text = username;
       _phoneController.text = phone;
       _emailController.text = email;
+      _avatarUrl = user['avatar_url'] ?? AuthService.getAvatarUrl(widget.currentUserId);
       if (_genderOptions.contains(gender)) {
         _selectedGender = gender;
       }
       if (savedAvatar != null && savedAvatar.toString().isNotEmpty) {
         _avatarPath = savedAvatar.toString();
-        final file = File(_avatarPath!);
-        if (file.existsSync()) {
-          _avatarFile = file;
+        if (!kIsWeb) {
+          final file = File(_avatarPath!);
+          if (file.existsSync()) {
+            _avatarFile = file;
+          }
         }
       }
       _isLoading = false;
@@ -78,9 +85,14 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     final picker = ImagePicker();
     final picked = await picker.pickImage(source: ImageSource.gallery);
     if (picked != null) {
+      final bytes = await picked.readAsBytes();
       setState(() {
-        _avatarFile = File(picked.path);
+        _avatarBytes = bytes;
+        _avatarFilename = picked.name;
         _avatarPath = picked.path;
+        if (!kIsWeb) {
+          _avatarFile = File(picked.path);
+        }
       });
     }
   }
@@ -96,6 +108,15 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         const SnackBar(content: Text("Name cannot be empty")),
       );
       return;
+    }
+
+    if (_avatarBytes != null) {
+      await AuthService.uploadAvatar(
+        userId: widget.currentUserId,
+        bytes: _avatarBytes!,
+        filename: _avatarFilename ?? 'avatar.jpg',
+        localFilePath: _avatarPath,
+      );
     }
 
     final updatedData = {
@@ -119,6 +140,24 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       );
       Navigator.pop(context, true);
     }
+  }
+
+  Widget _buildLetterAvatar() {
+    return Container(
+      color: AppTheme.primaryTeal.withValues(alpha: 0.15),
+      child: Center(
+        child: Text(
+          _nameController.text.isNotEmpty
+              ? _nameController.text[0].toUpperCase()
+              : 'U',
+          style: const TextStyle(
+            fontSize: 42,
+            fontWeight: FontWeight.w900,
+            color: AppTheme.primaryTeal,
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildFormFieldLabel(String label, bool isDark) {
@@ -226,23 +265,26 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                             ),
                           ),
                           child: ClipOval(
-                            child: _avatarFile != null
-                                ? Image.file(_avatarFile!, fit: BoxFit.cover)
-                                : Container(
-                                    color: AppTheme.primaryTeal.withValues(alpha: 0.15),
-                                    child: Center(
-                                      child: Text(
-                                        _nameController.text.isNotEmpty
-                                            ? _nameController.text[0].toUpperCase()
-                                            : 'U',
-                                        style: const TextStyle(
-                                          fontSize: 42,
-                                          fontWeight: FontWeight.w900,
-                                          color: AppTheme.primaryTeal,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
+                            child: Builder(
+                              builder: (context) {
+                                if (_avatarBytes != null) {
+                                  return Image.memory(_avatarBytes!, fit: BoxFit.cover, width: 110, height: 110);
+                                }
+                                if (_avatarFile != null && !kIsWeb && _avatarFile!.existsSync()) {
+                                  return Image.file(_avatarFile!, fit: BoxFit.cover, width: 110, height: 110);
+                                }
+                                if (_avatarUrl != null && _avatarUrl!.isNotEmpty) {
+                                  return Image.network(
+                                    _avatarUrl!,
+                                    fit: BoxFit.cover,
+                                    width: 110,
+                                    height: 110,
+                                    errorBuilder: (_, _, _) => _buildLetterAvatar(),
+                                  );
+                                }
+                                return _buildLetterAvatar();
+                              },
+                            ),
                           ),
                         ),
                         Positioned(

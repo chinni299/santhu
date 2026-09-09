@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:socket_io_client/socket_io_client.dart' as io;
@@ -9,6 +11,7 @@ import '../theme/app_theme.dart';
 import '../widgets/wave_clipper.dart';
 import 'chat_screen.dart';
 import 'login_screen.dart';
+import 'profile_screen.dart';
 
 class ConversationListScreen extends StatefulWidget {
   final int currentUserId;
@@ -32,13 +35,47 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
   final TextEditingController searchController = TextEditingController();
 
   final Map<int, bool> onlineStatusMap = {};
+  String currentUserDisplayName = '';
+  String? currentUserAvatarPath;
+  String? currentUserAvatarUrl;
 
   @override
   void initState() {
     super.initState();
+    _loadUserProfile();
     _initSocket();
     fetchConversations();
     searchController.addListener(_filterConversations);
+  }
+
+  Future<void> _loadUserProfile() async {
+    final user = await AuthService.getUser();
+    final localAvatar = await AuthService.getAvatarPath(widget.currentUserId);
+    if (mounted) {
+      setState(() {
+        currentUserDisplayName = user['name'] ?? (widget.currentUserId == 1 ? 'User 1' : 'User 2');
+        currentUserAvatarPath = localAvatar ?? user['avatar_path']?.toString();
+        currentUserAvatarUrl = user['avatar_url']?.toString() ?? AuthService.getAvatarUrl(widget.currentUserId);
+      });
+    }
+  }
+
+  ImageProvider? _getAvatarImageProvider(String? localPath, String? networkUrl) {
+    if (localPath != null && localPath.isNotEmpty) {
+      if (localPath.startsWith('http')) {
+        return NetworkImage(localPath);
+      }
+      if (!kIsWeb) {
+        final file = File(localPath);
+        if (file.existsSync()) {
+          return FileImage(file);
+        }
+      }
+    }
+    if (networkUrl != null && networkUrl.isNotEmpty) {
+      return NetworkImage(networkUrl);
+    }
+    return null;
   }
 
   void _filterConversations() {
@@ -235,6 +272,19 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
             ];
           }
 
+          // Apply saved custom aliases & avatars for each contact
+          for (var c in loadedConversations) {
+            final otherUid = int.tryParse((c['other_user_id'] ?? (widget.currentUserId == 1 ? 2 : 1)).toString()) ?? (widget.currentUserId == 1 ? 2 : 1);
+            final alias = await AuthService.getContactAlias(otherUid, widget.currentUserId);
+            if (alias != null && alias.isNotEmpty) {
+              c['other_user_name'] = alias;
+            }
+            final localAvatar = await AuthService.getAvatarPath(otherUid);
+            if (localAvatar != null && localAvatar.isNotEmpty) {
+              c['other_user_avatar'] = localAvatar;
+            }
+          }
+
           setState(() {
             conversations = loadedConversations;
             filteredConversations = List.from(conversations);
@@ -253,12 +303,17 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
 
     if (mounted) {
       // Fallback 2-user conversation tile if offline or error occurs
+      final otherUid = widget.currentUserId == 1 ? 2 : 1;
+      final alias = await AuthService.getContactAlias(otherUid, widget.currentUserId);
+      final localAvatar = await AuthService.getAvatarPath(otherUid);
+
       final fallbackConversations = [
         {
           'conversation_id': 1,
-          'other_user_id': widget.currentUserId == 1 ? 2 : 1,
-          'other_user_name': widget.currentUserId == 1 ? 'Second User' : 'Test User',
+          'other_user_id': otherUid,
+          'other_user_name': (alias != null && alias.isNotEmpty) ? alias : (widget.currentUserId == 1 ? 'Second User' : 'Test User'),
           'other_user_email': widget.currentUserId == 1 ? 'user2@example.com' : 'user1@example.com',
+          'other_user_avatar': localAvatar,
           'last_message': 'Tap to start chatting',
           'last_message_time': '',
           'unread_count': 0,
@@ -316,7 +371,6 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final currentUserName = widget.currentUserId == 1 ? 'User 1' : 'User 2';
 
     return Scaffold(
       backgroundColor: isDark ? const Color(0xFF121E24) : const Color(0xFFF5F7F8),
@@ -387,15 +441,33 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
                                   },
                                 ),
                                 const SizedBox(width: 4),
-                                CircleAvatar(
-                                  radius: 20,
-                                  backgroundColor: Colors.white.withValues(alpha: 0.3),
-                                  child: Text(
-                                    currentUserName[0],
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w900,
-                                      color: Colors.white,
-                                      fontSize: 18,
+                                GestureDetector(
+                                  onTap: () async {
+                                    await Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) => ProfileScreen(currentUserId: widget.currentUserId),
+                                      ),
+                                    );
+                                    _loadUserProfile();
+                                    fetchConversations();
+                                  },
+                                  child: Tooltip(
+                                    message: 'My Profile',
+                                    child: CircleAvatar(
+                                      radius: 20,
+                                      backgroundColor: Colors.white.withValues(alpha: 0.3),
+                                      backgroundImage: _getAvatarImageProvider(currentUserAvatarPath, currentUserAvatarUrl),
+                                      child: _getAvatarImageProvider(currentUserAvatarPath, currentUserAvatarUrl) == null
+                                          ? Text(
+                                              (currentUserDisplayName.isNotEmpty ? currentUserDisplayName[0] : (widget.currentUserId == 1 ? 'U' : 'U')).toUpperCase(),
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w900,
+                                                color: Colors.white,
+                                                fontSize: 18,
+                                              ),
+                                            )
+                                          : null,
                                     ),
                                   ),
                                 ),
@@ -504,6 +576,9 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
                                   final unread = item['unread_count'] ?? 0;
                                   final isOnline = (otherUserId != null &&
                                       onlineStatusMap[int.parse(otherUserId.toString())] == true);
+                                  final otherAvatarPath = item['other_user_avatar']?.toString();
+                                  final otherUidInt = otherUserId != null ? int.tryParse(otherUserId.toString()) : (widget.currentUserId == 1 ? 2 : 1);
+                                  final otherAvatarUrl = otherUidInt != null ? AuthService.getAvatarUrl(otherUidInt) : null;
 
                                   return Padding(
                                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -518,14 +593,17 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
                                             CircleAvatar(
                                               radius: 26,
                                               backgroundColor: AppTheme.primaryTeal.withValues(alpha: 0.15),
-                                              child: Text(
-                                                otherUserName.isNotEmpty ? otherUserName[0].toUpperCase() : 'U',
-                                                style: const TextStyle(
-                                                  fontSize: 20,
-                                                  fontWeight: FontWeight.w900,
-                                                  color: AppTheme.primaryTeal,
-                                                ),
-                                              ),
+                                              backgroundImage: _getAvatarImageProvider(otherAvatarPath, otherAvatarUrl),
+                                              child: _getAvatarImageProvider(otherAvatarPath, otherAvatarUrl) == null
+                                                  ? Text(
+                                                      otherUserName.isNotEmpty ? otherUserName[0].toUpperCase() : 'U',
+                                                      style: const TextStyle(
+                                                        fontSize: 20,
+                                                        fontWeight: FontWeight.w900,
+                                                        color: AppTheme.primaryTeal,
+                                                      ),
+                                                    )
+                                                  : null,
                                             ),
                                             if (isOnline)
                                               Positioned(

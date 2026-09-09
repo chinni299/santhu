@@ -29,5 +29,5 @@ void main() async {
   } else {
     debugPrint("Running on Web: Native Firebase FCM skipped (Use web config if FCM is needed on Web)");
   }
-  runApp(const DuoChatApp());
+  runApp(const ClockApp());
 }

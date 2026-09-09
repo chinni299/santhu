@@ -144,7 +144,7 @@ class _AppLockScreenState extends State<AppLockScreen> {
     if (_isSettingUpPin) {
       return _isConfirmingPin ? 'Confirm 6-Digit PIN' : 'Create 6-Digit PIN';
     }
-    return 'DuoChat Private Lock';
+    return 'Clock Private Lock';
   }
 
   String get _subtitleText {

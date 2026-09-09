@@ -265,22 +265,214 @@ class AuthService {
     return null;
   }
 
-  // Restore missing methods for compilation
-  static Future<Map<String, dynamic>> getPeerUserProfile(int otherUserId, int currentUserId) async {
-    return {'id': otherUserId, 'name': 'User $otherUserId', 'status': 'Available'};
+  // Persistent Contact Alias Storage (Per-Contact Custom Names)
+  static Future<void> saveContactAlias(int contactId, String alias, [int? currentUserId]) async {
+    try {
+      final key = 'duochat_contact_alias_$contactId';
+      _memStorage[key] = alias;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(key, alias);
+
+      if (currentUserId != null && currentUserId > 0) {
+        final scopedKey = 'duochat_contact_alias_${currentUserId}_$contactId';
+        _memStorage[scopedKey] = alias;
+        await prefs.setString(scopedKey, alias);
+      }
+      debugPrint("Saved contact alias for $contactId: '$alias' ✅");
+    } catch (e) {
+      debugPrint("Error saving contact alias: $e");
+    }
   }
 
-  static Future<void> saveContactAlias(int contactId, String alias) async {
-    debugPrint("Saving alias $alias for contact $contactId locally.");
+  static Future<String?> getContactAlias(int contactId, [int? currentUserId]) async {
+    try {
+      if (currentUserId != null && currentUserId > 0) {
+        final scopedKey = 'duochat_contact_alias_${currentUserId}_$contactId';
+        if (_memStorage.containsKey(scopedKey) && _memStorage[scopedKey]!.isNotEmpty) {
+          return _memStorage[scopedKey];
+        }
+        final prefs = await SharedPreferences.getInstance();
+        final scopedVal = prefs.getString(scopedKey);
+        if (scopedVal != null && scopedVal.isNotEmpty) {
+          _memStorage[scopedKey] = scopedVal;
+          return scopedVal;
+        }
+      }
+
+      final key = 'duochat_contact_alias_$contactId';
+      if (_memStorage.containsKey(key) && _memStorage[key]!.isNotEmpty) {
+        return _memStorage[key];
+      }
+      final prefs = await SharedPreferences.getInstance();
+      final alias = prefs.getString(key);
+      if (alias != null && alias.isNotEmpty) {
+        _memStorage[key] = alias;
+        return alias;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  // Persistent Avatar Path / URL (Local Storage per-user)
+  static Future<void> saveAvatarPath(String path, int userId) async {
+    try {
+      final key = 'duochat_avatar_path_$userId';
+      _memStorage[key] = path;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(key, path);
+    } catch (_) {}
+  }
+
+  static Future<String?> getAvatarPath(int userId) async {
+    try {
+      final key = 'duochat_avatar_path_$userId';
+      if (_memStorage.containsKey(key) && _memStorage[key]!.isNotEmpty) return _memStorage[key];
+      final prefs = await SharedPreferences.getInstance();
+      final val = prefs.getString(key);
+      if (val != null && val.isNotEmpty) {
+        _memStorage[key] = val;
+        return val;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  static String getAvatarUrl(int userId) {
+    return '${ApiConfig.baseUrl}/auth/avatar/$userId';
+  }
+
+  // Upload Avatar to Backend and persist locally
+  static Future<String?> uploadAvatar({
+    required int userId,
+    required Uint8List bytes,
+    required String filename,
+    String? localFilePath,
+  }) async {
+    try {
+      if (localFilePath != null && localFilePath.isNotEmpty) {
+        await saveAvatarPath(localFilePath, userId);
+      }
+
+      final token = await getTokenForUser(userId) ?? await getToken();
+      final uri = Uri.parse('${ApiConfig.baseUrl}/auth/avatar');
+      final request = http.MultipartRequest('POST', uri);
+
+      if (token != null && token.isNotEmpty) {
+        request.headers['Authorization'] = 'Bearer $token';
+      }
+
+      final multipartFile = http.MultipartFile.fromBytes(
+        'avatar',
+        bytes,
+        filename: filename.isNotEmpty ? filename : 'avatar.jpg',
+      );
+      request.files.add(multipartFile);
+
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['success'] == true) {
+          final serverUrl = data['avatar_url']?.toString() ?? getAvatarUrl(userId);
+          await saveAvatarPath(serverUrl, userId);
+
+          // Update user session
+          final user = await getUser();
+          user['avatar_url'] = serverUrl;
+          if (localFilePath != null) user['avatar_path'] = localFilePath;
+          await saveSession(token ?? '', user);
+
+          debugPrint("Avatar uploaded successfully for user $userId: $serverUrl ✅");
+          return serverUrl;
+        }
+      }
+    } catch (e) {
+      debugPrint("Error uploading avatar: $e");
+    }
+    return null;
+  }
+
+  // Fetch Peer Profile (checks local custom alias first, then backend DB)
+  static Future<Map<String, dynamic>> getPeerUserProfile(int otherUserId, int currentUserId) async {
+    final customAlias = await getContactAlias(otherUserId, currentUserId);
+    final localAvatar = await getAvatarPath(otherUserId);
+
+    try {
+      final headers = await getAuthHeadersForUser(currentUserId);
+      final url = Uri.parse('${ApiConfig.baseUrl}/auth/profile/$otherUserId');
+      final res = await http.get(url, headers: headers);
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        if (data['success'] == true && data['user'] != null) {
+          final u = data['user'];
+          final dbName = u['name']?.toString() ?? '';
+          final displayName = (customAlias != null && customAlias.isNotEmpty)
+              ? customAlias
+              : (dbName.isNotEmpty ? dbName : (otherUserId == 2 ? 'Leslie' : 'User $otherUserId'));
+
+          final avatarUrl = u['avatar_url'] != null && u['avatar_url'].toString().isNotEmpty
+              ? (u['avatar_url'].toString().startsWith('http')
+                  ? u['avatar_url'].toString()
+                  : '${ApiConfig.baseUrl}${u['avatar_url']}')
+              : getAvatarUrl(otherUserId);
+
+          return {
+            'id': otherUserId,
+            'display_name': displayName,
+            'name': dbName,
+            'avatar_url': avatarUrl,
+            'avatar_path': localAvatar ?? '',
+            'status': u['status'] ?? 'Available',
+            'is_online': u['is_online'] == true,
+            'last_seen_at': u['last_seen_at'],
+          };
+        }
+      }
+    } catch (e) {
+      debugPrint("Error fetching peer profile: $e");
+    }
+
+    return {
+      'id': otherUserId,
+      'display_name': customAlias ?? (otherUserId == 2 ? 'Leslie' : 'User $otherUserId'),
+      'name': customAlias ?? (otherUserId == 2 ? 'Leslie' : 'User $otherUserId'),
+      'avatar_path': localAvatar ?? '',
+      'avatar_url': getAvatarUrl(otherUserId),
+      'status': 'Available',
+    };
   }
 
   // Ensure a valid token exists for the given userId.
-  // Always uses the per-user isolated key — never cross-contaminates.
   static Future<String?> ensureToken(int userId) async {
     return await getTokenForUser(userId);
   }
 
+  // Update User Profile (persists locally and syncs to backend)
   static Future<void> updateUserProfile(Map<String, dynamic> profileData) async {
-    debugPrint("Updating profile: $profileData");
+    try {
+      final user = await getUser();
+      final userId = int.tryParse((user['id'] ?? 1).toString()) ?? 1;
+
+      // Update local storage
+      final merged = {...user, ...profileData};
+      await saveSession(await getTokenForUser(userId) ?? '', merged);
+
+      if (profileData.containsKey('avatar_path') && profileData['avatar_path'] != null) {
+        await saveAvatarPath(profileData['avatar_path'].toString(), userId);
+      }
+
+      // Sync to backend DB
+      final headers = await getAuthHeadersForUser(userId);
+      final url = Uri.parse('${ApiConfig.baseUrl}/auth/profile');
+      await http.put(
+        url,
+        headers: headers,
+        body: jsonEncode(profileData),
+      );
+      debugPrint("Updated user profile in backend & locally ✅");
+    } catch (e) {
+      debugPrint("Error updating user profile: $e");
+    }
   }
 }

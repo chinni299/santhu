@@ -7,14 +7,14 @@ import 'services/app_lock_service.dart';
 import 'services/auth_service.dart';
 import 'theme/app_theme.dart';
 
-class DuoChatApp extends StatefulWidget {
-  const DuoChatApp({super.key});
+class ClockApp extends StatefulWidget {
+  const ClockApp({super.key});
 
   @override
-  State<DuoChatApp> createState() => _DuoChatAppState();
+  State<ClockApp> createState() => _ClockAppState();
 }
 
-class _DuoChatAppState extends State<DuoChatApp> with WidgetsBindingObserver {
+class _ClockAppState extends State<ClockApp> with WidgetsBindingObserver {
   // Phase 1: Show Clock (disguise screen)
   // Phase 2: After clock long-press, show Login
   // Phase 3: After login, show PIN lock (setup or verify)
@@ -96,7 +96,7 @@ class _DuoChatAppState extends State<DuoChatApp> with WidgetsBindingObserver {
       builder: (context, currentMode, _) {
         return MaterialApp(
           debugShowCheckedModeBanner: false,
-          title: 'DuoChat',
+          title: 'Clock',
           theme: AppTheme.lightTheme,
           darkTheme: AppTheme.darkTheme,
           themeMode: currentMode,

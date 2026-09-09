@@ -35,7 +35,7 @@ class _LoginScreenState extends State<LoginScreen> {
     FocusScope.of(context).unfocus();
 
     final email = emailController.text.trim();
-    final password = passwordController.text;
+    final password = passwordController.text.trim();
 
     if (email.isEmpty || password.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -183,11 +183,6 @@ class _LoginScreenState extends State<LoginScreen> {
                         height: 90,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          gradient: const LinearGradient(
-                            colors: [Color(0xFF0F766E), Color(0xFF149B9B)],
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                          ),
                           boxShadow: [
                             BoxShadow(
                               color: const Color(0xFF149B9B).withValues(alpha: 0.35),
@@ -196,15 +191,16 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                           ],
                         ),
-                        child: const Icon(
-                          Icons.person_pin_rounded,
-                          color: Colors.white,
-                          size: 54,
+                        child: ClipOval(
+                          child: Image.asset(
+                            'assets/images/clock_logo.png',
+                            fit: BoxFit.cover,
+                          ),
                         ),
                       ),
                       const SizedBox(height: 10),
                       Text(
-                        'DuoChat',
+                        'Clock',
                         style: TextStyle(
                           fontSize: 26,
                           fontWeight: FontWeight.w900,
@@ -269,6 +265,9 @@ class _LoginScreenState extends State<LoginScreen> {
                         child: TextField(
                           controller: emailController,
                           keyboardType: TextInputType.emailAddress,
+                          autocorrect: false,
+                          enableSuggestions: false,
+                          textCapitalization: TextCapitalization.none,
                           style: TextStyle(
                             color: isDark ? Colors.white : const Color(0xFF111B21),
                             fontWeight: FontWeight.w800,
@@ -305,6 +304,9 @@ class _LoginScreenState extends State<LoginScreen> {
                         child: TextField(
                           controller: passwordController,
                           obscureText: obscurePassword,
+                          autocorrect: false,
+                          enableSuggestions: false,
+                          textCapitalization: TextCapitalization.none,
                           style: TextStyle(
                             color: isDark ? Colors.white : const Color(0xFF111B21),
                             fontWeight: FontWeight.w800,

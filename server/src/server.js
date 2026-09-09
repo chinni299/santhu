@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -5,7 +6,6 @@ const jwt = require("jsonwebtoken");
 const authRoutes = require("./auth");
 const messageRoutes = require("./messages");
 const cors = require("cors");
-require("dotenv").config();
 
 const pool = require("./db");
 const admin = require("firebase-admin");
@@ -412,7 +412,7 @@ io.on("connection", (socket) => {
         // Send generic privacy-preserving push notification (never leaking private text)
         await sendPushNotification({
           recipientId,
-          title: "DuoChat",
+          title: "Clock",
           body: "New message",
           dataPayload: {
             conversationId: String(conversationId),
@@ -726,7 +726,7 @@ io.on("connection", (socket) => {
       if (!isRecipientActiveInRoom) {
         await sendPushNotification({
           recipientId,
-          title: "DuoChat",
+          title: "Clock",
           body: isVideoCall ? "Incoming Video Call" : "Incoming Audio Call",
           dataPayload: {
             conversationId: String(conversationId),
