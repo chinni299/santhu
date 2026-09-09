@@ -260,7 +260,9 @@ class _ChatScreenState extends State<ChatScreen> {
     cleanUrl = cleanUrl
         .replaceAll('localhost:5000', ApiConfig.formattedHost)
         .replaceAll('127.0.0.1:5000', ApiConfig.formattedHost)
-        .replaceAll('192.168.0.120:5000', ApiConfig.formattedHost);
+        .replaceAll('192.168.0.120:5000', ApiConfig.formattedHost)
+        .replaceAll('192.168.0.116:5000', ApiConfig.formattedHost)
+        .replaceAll('http://santhu-qkn9.onrender.com', 'https://santhu-qkn9.onrender.com');
     return cleanUrl;
   }
 

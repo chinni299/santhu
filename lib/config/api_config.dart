@@ -1,27 +1,19 @@
 import 'package:flutter/foundation.dart';
 
 class ApiConfig {
-  // Current active local IP address for physical devices on your Wi-Fi network
-  static const String localIp = '192.168.0.116';
-  static const String port = '5000';
+  // Production backend deployed on Render
+  static const String _productionUrl = 'https://santhu-qkn9.onrender.com';
 
-  static String get baseUrl {
-    if (kIsWeb) {
-      // On Web platform (Chrome browser), use localhost
-      return 'http://localhost:$port';
-    } else if (defaultTargetPlatform == TargetPlatform.android) {
-      // On Android devices/emulators
-      return 'http://$localIp:$port';
-    } else {
-      return 'http://localhost:$port';
-    }
-  }
+  // Render production host (no protocol, no trailing slash) — used for URL rewriting
+  static const String _productionHost = 'santhu-qkn9.onrender.com';
+
+  static String get baseUrl => _productionUrl;
 
   static String get formattedHost {
     if (kIsWeb) {
-      return 'localhost:$port';
+      return _productionHost;
     } else {
-      return '$localIp:$port';
+      return _productionHost;
     }
   }
 }
