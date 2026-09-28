@@ -1105,6 +1105,37 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Phase 4 Couple Experience Socket Events
+  socket.on("importantDateChanged", (data) => {
+    const senderId = socket.user?.userId || socket.data?.userId;
+    if (!senderId) return;
+    socket.broadcast.emit("importantDateChanged", data);
+  });
+
+  socket.on("dailyQuestionAnswered", (data) => {
+    const senderId = socket.user?.userId || socket.data?.userId;
+    if (!senderId) return;
+    socket.broadcast.emit("dailyQuestionAnswered", data);
+  });
+
+  socket.on("memoryChanged", (data) => {
+    const senderId = socket.user?.userId || socket.data?.userId;
+    if (!senderId) return;
+    socket.broadcast.emit("memoryChanged", data);
+  });
+
+  socket.on("noteChanged", (data) => {
+    const senderId = socket.user?.userId || socket.data?.userId;
+    if (!senderId) return;
+    socket.broadcast.emit("noteChanged", data);
+  });
+
+  socket.on("routineUpdated", (data) => {
+    const senderId = socket.user?.userId || socket.data?.userId;
+    if (!senderId) return;
+    socket.broadcast.emit("routineUpdated", data);
+  });
+
   // React to Message Event
   socket.on("reactToMessage", async (data) => {
     try {

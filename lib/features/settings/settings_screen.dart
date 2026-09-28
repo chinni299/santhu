@@ -3,6 +3,13 @@ import '../../theme/app_theme.dart';
 import '../../services/auth_service.dart';
 import '../app_lock/biometric_service.dart';
 import '../app_lock/pin_setup_screen.dart';
+import '../chat_themes/chat_theme_settings_screen.dart';
+import '../important_dates/important_date_screen.dart';
+import '../countdown/countdown_screen.dart';
+import '../daily_question/daily_question_screen.dart';
+import '../private_memories/memory_timeline_screen.dart';
+import '../shared_notes/shared_notes_screen.dart';
+import '../couple_routines/couple_routine_settings_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   final int currentUserId;
@@ -99,15 +106,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           const Divider(),
 
-          // Section: Chat Settings
-          _sectionHeader('Chat'),
+          // Section: Appearance
+          _sectionHeader('Appearance'),
           ListTile(
-            leading: const Icon(Icons.color_lens_rounded, color: AppTheme.primaryTeal),
-            title: const Text('Theme & Appearance', style: TextStyle(fontWeight: FontWeight.w700)),
-            subtitle: const Text('Dark, Light, Midnight, Love themes'),
+            leading: const Icon(Icons.palette_outlined, color: AppTheme.primaryTeal),
+            title: const Text('Chat Theme & Wallpaper', style: TextStyle(fontWeight: FontWeight.w700)),
+            subtitle: const Text('Themes, colors, and custom wallpaper'),
             trailing: const Icon(Icons.chevron_right_rounded),
             onTap: () {
-              _showThemePicker(context);
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const ChatThemeSettingsScreen()));
             },
           ),
           SwitchListTile(
@@ -116,6 +123,65 @@ class _SettingsScreenState extends State<SettingsScreen> {
             value: _enterIsSend,
             activeTrackColor: AppTheme.primaryTeal,
             onChanged: (val) => setState(() => _enterIsSend = val),
+          ),
+
+          const Divider(),
+
+          // Section: Couple Experience
+          _sectionHeader('Couple Experience'),
+          ListTile(
+            leading: const Icon(Icons.calendar_month_outlined, color: AppTheme.primaryTeal),
+            title: const Text('Important Dates', style: TextStyle(fontWeight: FontWeight.w700)),
+            subtitle: const Text('Anniversary, birthdays & special moments'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: () {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const ImportantDateScreen()));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.hourglass_bottom_outlined, color: AppTheme.primaryTeal),
+            title: const Text('Countdown', style: TextStyle(fontWeight: FontWeight.w700)),
+            subtitle: const Text('Live countdown to special events'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: () {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const CountdownScreen()));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.quiz_outlined, color: AppTheme.primaryTeal),
+            title: const Text('Daily Question', style: TextStyle(fontWeight: FontWeight.w700)),
+            subtitle: const Text('Answer daily couple questions together'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: () {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const DailyQuestionScreen()));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.photo_library_outlined, color: AppTheme.primaryTeal),
+            title: const Text('Private Memories', style: TextStyle(fontWeight: FontWeight.w700)),
+            subtitle: const Text('Shared photos & video timeline'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: () {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const MemoryTimelineScreen()));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.sticky_note_2_outlined, color: AppTheme.primaryTeal),
+            title: const Text('Shared Private Notes', style: TextStyle(fontWeight: FontWeight.w700)),
+            subtitle: const Text('Notes & lists between User 1 and User 2'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: () {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const SharedNotesScreen()));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.wb_sunny_outlined, color: AppTheme.primaryTeal),
+            title: const Text('Good Morning / Night Routines', style: TextStyle(fontWeight: FontWeight.w700)),
+            subtitle: const Text('Routine times and custom messages'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: () {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const CoupleRoutineSettingsScreen()));
+            },
           ),
 
           const Divider(),
@@ -175,51 +241,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           letterSpacing: 1.2,
         ),
       ),
-    );
-  }
-
-  void _showThemePicker(BuildContext ctx) {
-    showModalBottomSheet(
-      context: ctx,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (context) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text('Choose Chat Theme', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
-                const SizedBox(height: 16),
-                ListTile(
-                  leading: const Icon(Icons.brightness_auto_rounded, color: AppTheme.primaryTeal),
-                  title: const Text('System Default'),
-                  onTap: () {
-                    themeModeNotifier.value = ThemeMode.system;
-                    Navigator.pop(context);
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.dark_mode_rounded, color: Color(0xFF0F172A)),
-                  title: const Text('Midnight Dark'),
-                  onTap: () {
-                    themeModeNotifier.value = ThemeMode.dark;
-                    Navigator.pop(context);
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.light_mode_rounded, color: Colors.orange),
-                  title: const Text('Light Clean'),
-                  onTap: () {
-                    themeModeNotifier.value = ThemeMode.light;
-                    Navigator.pop(context);
-                  },
-                ),
-              ],
-            ),
-          ),
-        );
-      },
     );
   }
 }
