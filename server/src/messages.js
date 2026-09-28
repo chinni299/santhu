@@ -69,6 +69,25 @@ pool.query(`
   console.error("Migration error for live-location columns:", err.message);
 });
 
+// Migration for Couple Status & Moods
+pool.query(`
+  CREATE TABLE IF NOT EXISTS couple_user_status (
+    user_id INTEGER PRIMARY KEY,
+    status VARCHAR(32) NOT NULL DEFAULT 'online',
+    custom_text TEXT,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+  );
+  CREATE TABLE IF NOT EXISTS user_moods (
+    user_id INTEGER PRIMARY KEY,
+    mood VARCHAR(32),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+  );
+`).then(() => {
+  console.log("Couple-status & user-moods tables verified ✅");
+}).catch((err) => {
+  console.error("Migration error for couple-status/user-moods:", err.message);
+});
+
 const DANGEROUS_EXTENSIONS = new Set([
   ".exe", ".bat", ".cmd", ".sh", ".js", ".apk", ".msi", ".vbs", ".ps1", ".php", ".py", ".pl", ".cgi", ".jar", ".scr", ".com", ".pif", ".htm", ".html"
 ]);
@@ -830,6 +849,42 @@ router.get("/on-this-day/:conversationId", async (req, res) => {
   } catch (error) {
     console.error("Get on-this-day memories error:", error.message);
     res.status(500).json({ success: false, message: "Failed to fetch memories" });
+  }
+});
+
+// GET COUPLE STATUS FOR A USER
+router.get("/couple-status/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const result = await pool.query(
+      "SELECT user_id, status, custom_text, updated_at FROM couple_user_status WHERE user_id = $1",
+      [userId]
+    );
+    res.json({
+      success: true,
+      data: result.rows[0] || { user_id: Number(userId), status: "online", custom_text: null, updated_at: new Date() },
+    });
+  } catch (error) {
+    console.error("Get couple status error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to fetch status" });
+  }
+});
+
+// GET USER MOOD
+router.get("/mood/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const result = await pool.query(
+      "SELECT user_id, mood, updated_at FROM user_moods WHERE user_id = $1",
+      [userId]
+    );
+    res.json({
+      success: true,
+      data: result.rows[0] || { user_id: Number(userId), mood: null, updated_at: new Date() },
+    });
+  } catch (error) {
+    console.error("Get mood error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to fetch mood" });
   }
 });
 

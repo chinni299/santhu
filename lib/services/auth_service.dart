@@ -104,6 +104,8 @@ class AuthService {
     await _writeSecure(_pinHashKey, hash);
   }
 
+  static Future<void> setPin(String pin) => savePin(pin);
+
   // Delete stored PIN (for reset)
   static Future<void> deletePin() async {
     await _deleteSecure(_pinHashKey);
@@ -114,7 +116,11 @@ class AuthService {
   static Future<bool> verifyPin(String pin) async {
     final salt = await _readSecure(_pinSaltKey);
     final storedHash = await _readSecure(_pinHashKey);
-    if (salt == null || storedHash == null) return false;
+
+    if (salt == null || storedHash == null) {
+      return false;
+    }
+
     final enteredHash = _hashPin(pin, salt);
     return enteredHash == storedHash;
   }

@@ -994,6 +994,117 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ==================================================
+  // COUPLE STATUS & MOOD SHARING & THINKING OF YOU
+  // ==================================================
+  socket.on("setCoupleStatus", async (data) => {
+    try {
+      const { status, customText } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
+      if (!userId || !status) return;
+
+      const result = await pool.query(
+        `INSERT INTO couple_user_status (user_id, status, custom_text, updated_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET status = EXCLUDED.status, custom_text = EXCLUDED.custom_text, updated_at = NOW()
+         RETURNING user_id, status, custom_text, updated_at`,
+        [userId, status, customText || null]
+      );
+
+      const recipientId = Number(userId) === 1 ? 2 : 1;
+      const statusPayload = {
+        userId: Number(userId),
+        status: result.rows[0].status,
+        customText: result.rows[0].custom_text,
+        updatedAt: result.rows[0].updated_at,
+      };
+
+      io.to(`user_${recipientId}`).emit("coupleStatusUpdated", statusPayload);
+      socket.emit("coupleStatusUpdated", statusPayload);
+      console.log(`User ${userId} updated couple status: ${status} 🟢`);
+    } catch (err) {
+      console.error("Error in setCoupleStatus socket event:", err.message);
+    }
+  });
+
+  socket.on("setMood", async (data) => {
+    try {
+      const { mood } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
+      if (!userId) return;
+
+      const result = await pool.query(
+        `INSERT INTO user_moods (user_id, mood, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET mood = EXCLUDED.mood, updated_at = NOW()
+         RETURNING user_id, mood, updated_at`,
+        [userId, mood || null]
+      );
+
+      const recipientId = Number(userId) === 1 ? 2 : 1;
+      const moodPayload = {
+        userId: Number(userId),
+        mood: result.rows[0].mood,
+        updatedAt: result.rows[0].updated_at,
+      };
+
+      io.to(`user_${recipientId}`).emit("moodUpdated", moodPayload);
+      socket.emit("moodUpdated", moodPayload);
+      console.log(`User ${userId} updated mood: ${mood} 😊`);
+    } catch (err) {
+      console.error("Error in setMood socket event:", err.message);
+    }
+  });
+
+  const thinkingOfYouCooldowns = new Map();
+
+  socket.on("thinkingOfYou", async (data) => {
+    try {
+      const { conversationId } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId) return;
+
+      const lastSent = thinkingOfYouCooldowns.get(senderId) || 0;
+      const now = Date.now();
+      if (now - lastSent < 30000) {
+        console.warn(`ThinkingOfYou rate-limited for user ${senderId}`);
+        return;
+      }
+      thinkingOfYouCooldowns.set(senderId, now);
+
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+      io.to(`user_${recipientId}`).emit("thinkingOfYouReceived", {
+        senderId: Number(senderId),
+        conversationId: Number(conversationId),
+        timestamp: now,
+      });
+
+      const room = String(conversationId);
+      const roomSockets = io.sockets.adapter.rooms.get(room);
+      let isRecipientActiveInRoom = false;
+      if (roomSockets) {
+        for (const socketId of roomSockets) {
+          const s = io.sockets.sockets.get(socketId);
+          if (s && s.data && s.data.userId && Number(s.data.userId) === Number(recipientId)) {
+            isRecipientActiveInRoom = true;
+            break;
+          }
+        }
+      }
+      if (!isRecipientActiveInRoom) {
+        await sendPushNotification({
+          recipientId,
+          title: "Clock",
+          body: "💭 Thinking of You",
+          dataPayload: { conversationId: String(conversationId), type: "thinking_of_you" },
+        });
+      }
+      console.log(`User ${senderId} sent "Thinking of You" to User ${recipientId} 💭❤️`);
+    } catch (err) {
+      console.error("Error in thinkingOfYou socket event:", err.message);
+    }
+  });
+
   // React to Message Event
   socket.on("reactToMessage", async (data) => {
     try {

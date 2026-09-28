@@ -3117,13 +3117,32 @@ class _ChatScreenState extends State<ChatScreen> {
       );
 
       final isLive = durationSeconds != null && durationSeconds > 0;
+      final payload = jsonEncode({'lat': position.latitude, 'lng': position.longitude, 'isLive': isLive});
+      final tempMsgId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
 
-      if (isLive) {
+      final tempLocationMsg = {
+        'id': tempMsgId,
+        'senderId': widget.currentUserId,
+        'sender_id': widget.currentUserId,
+        'message': payload,
+        'attachmentType': 'location',
+        'attachment_type': 'location',
+        'isMe': true,
+        'isDelivered': true,
+        'isRead': false,
+        'time': _formatTime(DateTime.now().toIso8601String()),
+      };
+
+      if (mounted) {
         setState(() {
-          _isSharingLiveLocation = true;
-          _activeLiveLocationMessageId = null; // learned once the server echoes newMessage
-          _liveLocationEndTime = DateTime.now().add(Duration(seconds: durationSeconds));
+          if (isLive) {
+            _isSharingLiveLocation = true;
+            _activeLiveLocationMessageId = null; // learned once the server echoes newMessage
+            _liveLocationEndTime = DateTime.now().add(Duration(seconds: durationSeconds));
+          }
+          messages.add(tempLocationMsg);
         });
+        _scrollToBottom();
       }
 
       socket?.emit('shareLiveLocation', {
@@ -4499,7 +4518,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                                         ),
                                                       ),
                                                     ),
-                                                ] else if (!isDeleted && message['attachmentType'] == 'location') ...[
+                                                ] else if (!isDeleted && (message['attachmentType'] == 'location' || message['attachment_type'] == 'location')) ...[
                                                   Builder(
                                                     builder: (context) {
                                                       Map<String, dynamic> locData = {};
