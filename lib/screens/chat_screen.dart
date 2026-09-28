@@ -117,7 +117,6 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isRecordingVoice = false;
   Timer? _recordingTimer;
   int _recordingSeconds = 0;
-  String? _recordingFilePath;
 
   String get baseUrl => ApiConfig.baseUrl;
 
@@ -1591,7 +1590,6 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       setState(() {
         _isRecordingVoice = true;
-        _recordingFilePath = filePath;
         _recordingSeconds = 0;
       });
 
