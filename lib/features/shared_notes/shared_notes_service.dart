@@ -47,16 +47,17 @@ class SharedNotesService {
 
   static Future<SharedNote?> updateNote({required int id, String? title, String? content}) async {
     final token = await AuthService.getToken();
+    final bodyMap = <String, dynamic>{};
+    if (title != null) bodyMap['title'] = title;
+    if (content != null) bodyMap['content'] = content;
+
     final response = await http.put(
       Uri.parse('${ApiConfig.baseUrl}/messages/notes/$id'),
       headers: {
         'Content-Type': 'application/json',
         if (token != null) 'Authorization': 'Bearer $token',
       },
-      body: jsonEncode({
-        if (title != null) 'title': title,
-        if (content != null) 'content': content,
-      }),
+      body: jsonEncode(bodyMap),
     );
 
     if (response.statusCode == 200) {

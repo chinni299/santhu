@@ -63,18 +63,19 @@ class ImportantDateService {
     String? note,
   }) async {
     final token = await AuthService.getToken();
+    final bodyMap = <String, dynamic>{};
+    if (title != null) bodyMap['title'] = title;
+    if (dateType != null) bodyMap['date_type'] = dateType;
+    if (dateValue != null) bodyMap['date_value'] = dateValue.toIso8601String();
+    if (note != null) bodyMap['note'] = note;
+
     final response = await http.put(
       Uri.parse('${ApiConfig.baseUrl}/messages/important-dates/$id'),
       headers: {
         'Content-Type': 'application/json',
         if (token != null) 'Authorization': 'Bearer $token',
       },
-      body: jsonEncode({
-        if (title != null) 'title': title,
-        if (dateType != null) 'date_type': dateType,
-        if (dateValue != null) 'date_value': dateValue.toIso8601String(),
-        if (note != null) 'note': note,
-      }),
+      body: jsonEncode(bodyMap),
     );
 
     if (response.statusCode == 200) {

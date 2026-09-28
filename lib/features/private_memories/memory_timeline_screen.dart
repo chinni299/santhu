@@ -116,7 +116,7 @@ class _MemoryTimelineScreenState extends State<MemoryTimelineScreen> {
                               height: 220,
                               width: double.infinity,
                               fit: BoxFit.cover,
-                              errorBuilder: (_, __, ___) => Container(
+                              errorBuilder: (context, error, stackTrace) => Container(
                                 height: 180,
                                 color: Colors.black26,
                                 child: const Center(child: Icon(Icons.broken_image, color: Colors.grey, size: 40)),

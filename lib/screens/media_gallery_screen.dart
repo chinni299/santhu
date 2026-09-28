@@ -139,7 +139,7 @@ class _MediaGalleryScreenState extends State<MediaGalleryScreen> {
                   url,
                   headers: _authHeaders,
                   fit: BoxFit.contain,
-                  errorBuilder: (_, __, ___) => const Icon(Icons.broken_image_rounded, size: 64, color: Colors.white54),
+                  errorBuilder: (context, error, stackTrace) => const Icon(Icons.broken_image_rounded, size: 64, color: Colors.white54),
                 ),
               ),
             ),
@@ -198,7 +198,7 @@ class _MediaGalleryScreenState extends State<MediaGalleryScreen> {
                 if (progress == null) return child;
                 return Container(color: Colors.black12);
               },
-              errorBuilder: (_, __, ___) => Container(
+              errorBuilder: (context, error, stackTrace) => Container(
                 color: Colors.grey.shade300,
                 child: const Icon(Icons.broken_image_rounded, color: Colors.grey),
               ),
@@ -214,7 +214,7 @@ class _MediaGalleryScreenState extends State<MediaGalleryScreen> {
     return ListView.separated(
       padding: const EdgeInsets.symmetric(vertical: 8),
       itemCount: items.length,
-      separatorBuilder: (_, __) => const Divider(height: 1, indent: 72),
+      separatorBuilder: (context, index) => const Divider(height: 1, indent: 72),
       itemBuilder: (context, i) {
         final item = items[i];
         final bool isMine = int.tryParse(item['sender_id'].toString()) == widget.currentUserId;

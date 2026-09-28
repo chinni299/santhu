@@ -72,10 +72,10 @@ class _CountdownWidgetState extends State<CountdownWidget> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
-              _buildTimeUnit('$days', 'Days'),
-              _buildTimeUnit('${hours.toString().padLeft(2, '0')}', 'Hrs'),
-              _buildTimeUnit('${minutes.toString().padLeft(2, '0')}', 'Mins'),
-              _buildTimeUnit('${seconds.toString().padLeft(2, '0')}', 'Secs'),
+              _buildTimeUnit(days.toString(), 'Days'),
+              _buildTimeUnit(hours.toString().padLeft(2, '0'), 'Hrs'),
+              _buildTimeUnit(minutes.toString().padLeft(2, '0'), 'Mins'),
+              _buildTimeUnit(seconds.toString().padLeft(2, '0'), 'Secs'),
             ],
           ),
         ],
