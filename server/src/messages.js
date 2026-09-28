@@ -22,6 +22,8 @@ const ALLOWED_EXTENSIONS = new Set([
   ".jpg", ".jpeg", ".png", ".webp", ".gif",
   // Documents
   ".pdf", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+  // Audio (voice messages)
+  ".m4a", ".mp3", ".wav", ".aac", ".ogg", ".webm",
   // Encrypted binary
   ".bin"
 ]);
@@ -34,6 +36,37 @@ pool.query(`
   console.log("Messages table nonce and is_encrypted columns verified ✅");
 }).catch((err) => {
   console.error("Migration error for messages E2EE columns:", err.message);
+});
+
+// Migration for Disappearing Messages
+pool.query(`
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+  ALTER TABLE conversations ADD COLUMN IF NOT EXISTS disappearing_timer_seconds INTEGER;
+`).then(() => {
+  console.log("Disappearing-messages columns (expires_at, disappearing_timer_seconds) verified ✅");
+}).catch((err) => {
+  console.error("Migration error for disappearing-messages columns:", err.message);
+});
+
+// Migration for Pinned Messages
+pool.query(`
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT false;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS pinned_by INTEGER;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
+`).then(() => {
+  console.log("Pinned-messages columns (is_pinned, pinned_by, pinned_at) verified ✅");
+}).catch((err) => {
+  console.error("Migration error for pinned-messages columns:", err.message);
+});
+
+// Migration for Live Location Sharing
+pool.query(`
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS live_location_active BOOLEAN DEFAULT false;
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS live_location_expires_at TIMESTAMPTZ;
+`).then(() => {
+  console.log("Live-location columns (live_location_active, live_location_expires_at) verified ✅");
+}).catch((err) => {
+  console.error("Migration error for live-location columns:", err.message);
 });
 
 const DANGEROUS_EXTENSIONS = new Set([
@@ -161,10 +194,18 @@ router.get("/attachments/:messageId", async (req, res) => {
       ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       ".ppt": "application/vnd.ms-powerpoint",
       ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      ".m4a": "audio/mp4",
+      ".mp3": "audio/mpeg",
+      ".wav": "audio/wav",
+      ".aac": "audio/aac",
+      ".ogg": "audio/ogg",
+      ".webm": "audio/webm",
     };
 
     const contentType = mimeTypes[ext] || "application/octet-stream";
-    const disposition = msg.attachment_type === "image" ? "inline" : `attachment; filename="${encodeURIComponent(msg.attachment_name || safeFilename)}"`;
+    const disposition = (msg.attachment_type === "image" || msg.attachment_type === "audio")
+      ? "inline"
+      : `attachment; filename="${encodeURIComponent(msg.attachment_name || safeFilename)}"`;
 
     res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Disposition", disposition);
@@ -236,10 +277,18 @@ router.get("/attachments/file/:filename", async (req, res) => {
       ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       ".ppt": "application/vnd.ms-powerpoint",
       ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      ".m4a": "audio/mp4",
+      ".mp3": "audio/mpeg",
+      ".wav": "audio/wav",
+      ".aac": "audio/aac",
+      ".ogg": "audio/ogg",
+      ".webm": "audio/webm",
     };
 
     const contentType = mimeTypes[ext] || "application/octet-stream";
-    const disposition = msg.attachment_type === "image" ? "inline" : `attachment; filename="${encodeURIComponent(msg.attachment_name || safeFilename)}"`;
+    const disposition = (msg.attachment_type === "image" || msg.attachment_type === "audio")
+      ? "inline"
+      : `attachment; filename="${encodeURIComponent(msg.attachment_name || safeFilename)}"`;
 
     res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Disposition", disposition);
@@ -298,6 +347,8 @@ router.get("/conversations/:userId", async (req, res) => {
         CASE 
           WHEN latest_m.is_deleted = true THEN 'This message was deleted' 
           WHEN latest_m.attachment_type = 'image' THEN '📷 Photo'
+          WHEN latest_m.attachment_type = 'audio' THEN '🎤 Voice message'
+          WHEN latest_m.attachment_type = 'location' THEN '📍 Location'
           WHEN latest_m.attachment_type IS NOT NULL THEN '📎 File'
           ELSE latest_m.message 
         END AS last_message,
@@ -340,6 +391,8 @@ router.get("/conversations/:userId", async (req, res) => {
           CASE 
             WHEN latest_m.is_deleted = true THEN 'This message was deleted' 
             WHEN latest_m.attachment_type = 'image' THEN '📷 Photo'
+            WHEN latest_m.attachment_type = 'audio' THEN '🎤 Voice message'
+          WHEN latest_m.attachment_type = 'location' THEN '📍 Location'
             WHEN latest_m.attachment_type IS NOT NULL THEN '📎 File'
             ELSE latest_m.message 
           END AS last_message,
@@ -403,7 +456,9 @@ router.get("/:conversationId", async (req, res) => {
         m.id, m.conversation_id, m.sender_id, m.message, 
         m.attachment_url, m.attachment_type, m.attachment_name, m.attachment_size,
         m.nonce, m.is_encrypted,
-        m.is_delivered, m.is_read, m.is_edited, m.is_deleted, m.reactions, m.created_at,
+        m.is_delivered, m.is_read, m.is_edited, m.is_deleted, m.reactions, m.expires_at, m.created_at,
+        m.is_pinned, m.pinned_by, m.pinned_at,
+        m.live_location_active, m.live_location_expires_at,
         m.reply_to_message_id,
         parent_m.sender_id AS reply_sender_id,
         parent_u.name AS reply_sender_name,
@@ -478,10 +533,25 @@ router.post("/upload", uploadSingleFile, async (req, res) => {
     const originalName = path.basename(rawOriginalName).replace(/[\0\r\n]/g, "");
     const fileSize = file.size;
 
+    // NEW: Disappearing Messages — inherit the conversation's active timer, if any
+    let expiresAt = null;
+    try {
+      const convRes = await pool.query(
+        "SELECT disappearing_timer_seconds FROM conversations WHERE id = $1",
+        [conversationId]
+      );
+      const timerSeconds = convRes.rows[0]?.disappearing_timer_seconds;
+      if (timerSeconds && Number(timerSeconds) > 0) {
+        expiresAt = new Date(Date.now() + Number(timerSeconds) * 1000);
+      }
+    } catch (timerErr) {
+      console.error("Error resolving disappearing timer for upload:", timerErr.message);
+    }
+
     const result = await pool.query(
-      `INSERT INTO messages (conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, false)
-       RETURNING id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, is_edited, is_deleted, reactions, created_at`,
+      `INSERT INTO messages (conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, false, $11)
+       RETURNING id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, is_edited, is_deleted, reactions, expires_at, created_at`,
       [
         conversationId,
         authUserId,
@@ -493,6 +563,7 @@ router.post("/upload", uploadSingleFile, async (req, res) => {
         replyToMessageId || null,
         nonce || null,
         isEncrypted !== undefined ? (isEncrypted === "true" || isEncrypted === true) : true,
+        expiresAt,
       ]
     );
 
@@ -654,6 +725,111 @@ router.get("/user-status/:userId", async (req, res) => {
   } catch (error) {
     console.error("Error getting user status:", error.message);
     res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// GET DISAPPEARING MESSAGES TIMER FOR A CONVERSATION
+router.get("/disappearing-timer/:conversationId", async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const authUserId = req.user.id;
+
+    const memberCheck = await pool.query(
+      "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+      [conversationId, authUserId]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ success: false, message: "Not authorized for this conversation" });
+    }
+
+    const result = await pool.query(
+      "SELECT disappearing_timer_seconds FROM conversations WHERE id = $1",
+      [conversationId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Conversation not found" });
+    }
+
+    res.json({
+      success: true,
+      disappearingTimerSeconds: result.rows[0].disappearing_timer_seconds || 0,
+    });
+  } catch (error) {
+    console.error("Get disappearing timer error:", error.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// GET SHARED MEDIA GALLERY FOR A CONVERSATION (images, files, audio)
+router.get("/media/:conversationId", async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const authUserId = req.user.id;
+
+    const memberCheck = await pool.query(
+      "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+      [conversationId, authUserId]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ success: false, message: "Not authorized for this conversation" });
+    }
+
+    const result = await pool.query(
+      `SELECT id, conversation_id, sender_id, attachment_url, attachment_type, attachment_name, attachment_size, created_at
+       FROM messages
+       WHERE conversation_id = $1
+         AND is_deleted = false
+         AND attachment_url IS NOT NULL
+         AND attachment_type IN ('image', 'file', 'audio')
+       ORDER BY created_at DESC`,
+      [conversationId]
+    );
+
+    res.json({
+      success: true,
+      data: result.rows,
+    });
+  } catch (error) {
+    console.error("Get media gallery error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to fetch media" });
+  }
+});
+
+// GET "ON THIS DAY" MEMORIES — messages sent on this same month/day in previous years
+router.get("/on-this-day/:conversationId", async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const authUserId = req.user.id;
+
+    const memberCheck = await pool.query(
+      "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+      [conversationId, authUserId]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ success: false, message: "Not authorized for this conversation" });
+    }
+
+    const result = await pool.query(
+      `SELECT id, conversation_id, sender_id, message, attachment_type, attachment_name, created_at,
+              EXTRACT(YEAR FROM created_at)::int AS year_sent
+       FROM messages
+       WHERE conversation_id = $1
+         AND is_deleted = false
+         AND EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM NOW())
+         AND EXTRACT(DAY FROM created_at) = EXTRACT(DAY FROM NOW())
+         AND EXTRACT(YEAR FROM created_at) < EXTRACT(YEAR FROM NOW())
+       ORDER BY created_at DESC
+       LIMIT 30`,
+      [conversationId]
+    );
+
+    res.json({
+      success: true,
+      data: result.rows,
+    });
+  } catch (error) {
+    console.error("Get on-this-day memories error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to fetch memories" });
   }
 });
 

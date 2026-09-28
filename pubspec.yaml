@@ -51,6 +51,10 @@ dependencies:
   path_provider: ^2.1.5
   flutter_webrtc: ^0.12.4
   emoji_picker_flutter: ^4.5.4
+  record: ^7.1.1
+  audioplayers: ^6.8.1
+  geolocator: ^13.0.1
+  url_launcher: ^6.3.0
 
 dev_dependencies:
   flutter_test:

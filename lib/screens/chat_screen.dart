@@ -16,12 +16,17 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
 import 'package:flutter/foundation.dart' as foundation;
+import 'package:record/record.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../config/api_config.dart';
 import '../services/auth_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/wave_clipper.dart';
 
 import 'call_screen.dart';
+import 'media_gallery_screen.dart';
 
 
 class ChatScreen extends StatefulWidget {
@@ -79,9 +84,24 @@ class _ChatScreenState extends State<ChatScreen> {
   String disappearingTimer = 'Off';
   bool isFavourite = false;
   String customList = 'None';
+  // NEW: Disappearing Messages — raw seconds value synced from the server (null = Off)
+  int? disappearingTimerSeconds;
   bool isSearchingInChat = false;
   final inChatSearchController = TextEditingController();
   String inChatSearchQuery = '';
+
+  // NEW: Pinned Messages — at most one pinned message per conversation
+  Map<String, dynamic>? pinnedMessage;
+
+  // NEW: Live Location Sharing state
+  int? _activeLiveLocationMessageId;
+  Timer? _liveLocationTimer;
+  DateTime? _liveLocationEndTime;
+  bool _isSharingLiveLocation = false;
+
+  // NEW: "On This Day" Memories
+  List<Map<String, dynamic>> onThisDayMemories = [];
+  bool showOnThisDayBanner = false;
 
   // WhatsApp-style Document Download Tracking
   final Map<String, String> _downloadedFilePaths = {};
@@ -91,6 +111,13 @@ class _ChatScreenState extends State<ChatScreen> {
   bool isVanishMode = false;
   double vanishDragOffset = 0.0;
   bool isVanishThresholdReached = false;
+
+  // Voice Message Recording State
+  final AudioRecorder _audioRecorder = AudioRecorder();
+  bool _isRecordingVoice = false;
+  Timer? _recordingTimer;
+  int _recordingSeconds = 0;
+  String? _recordingFilePath;
 
   String get baseUrl => ApiConfig.baseUrl;
 
@@ -112,6 +139,11 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     });
 
+    // Rebuild input bar so the mic/send icon swaps as soon as text is typed or cleared
+    messageController.addListener(() {
+      if (mounted) setState(() {});
+    });
+
     _loadPeerProfile();
     _loadAuthHeaders();
     fetchMessages(showLoading: messages.isEmpty);
@@ -121,6 +153,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     fetchUnreadCount();
     fetchOtherUserStatus();
+    _checkOnThisDayMemories(); // NEW: surface "on this day" memories on open
   }
 
   Future<void> _loadPeerProfile() async {
@@ -305,7 +338,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (kIsWeb) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Image saved successfully Î“Â£Ã ")),
+            const SnackBar(content: Text("Image saved successfully Î“Â£Ã ")),
           );
         }
         return;
@@ -348,7 +381,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Saved directly to Gallery ($filename) â‰¡Æ’Ã»â•âˆ©â••Ã…Î“Â£Ã "),
+            content: Text("Saved directly to Gallery ($filename) â‰¡Æ’Ã»â•âˆ©â••Ã…Î“Â£Ã "),
             backgroundColor: AppTheme.primaryTeal,
             duration: const Duration(seconds: 3),
             action: SnackBarAction(
@@ -650,6 +683,110 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  // ==================================================
+  // "ON THIS DAY" MEMORIES
+  // ==================================================
+  Future<void> _checkOnThisDayMemories() async {
+    try {
+      final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
+      final response = await http.get(
+        Uri.parse('$baseUrl/messages/on-this-day/${widget.conversationId}'),
+        headers: headers,
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(utf8.decode(response.bodyBytes));
+        if (data['success'] == true && data['data'] != null) {
+          final List fetched = data['data'];
+          if (fetched.isNotEmpty && mounted) {
+            setState(() {
+              onThisDayMemories = fetched.cast<Map<String, dynamic>>();
+              showOnThisDayBanner = true;
+            });
+          }
+        }
+      }
+    } catch (e) {
+      // Silent — memories are a nice-to-have, never block the chat on failure
+    }
+  }
+
+  void _showOnThisDayDialog() {
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.auto_awesome_rounded, color: AppTheme.primaryTeal),
+            SizedBox(width: 8),
+            Text('On This Day', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 17)),
+          ],
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: onThisDayMemories.length,
+            itemBuilder: (context, index) {
+              final mem = onThisDayMemories[index];
+              final isMe = int.tryParse((mem['sender_id'] ?? '').toString()) == widget.currentUserId;
+              final year = mem['year_sent']?.toString() ?? '';
+              final nowYear = DateTime.now().year;
+              final yearsAgo = year.isNotEmpty ? (nowYear - int.parse(year)) : null;
+              final label = yearsAgo == 1 ? '1 year ago' : '$yearsAgo years ago';
+              final attachmentType = mem['attachment_type'];
+              final preview = attachmentType == 'image'
+                  ? '📷 Photo'
+                  : attachmentType == 'audio'
+                      ? '🎤 Voice message'
+                      : attachmentType == 'file'
+                          ? '📎 ${mem['attachment_name'] ?? 'File'}'
+                          : (mem['message']?.toString().isNotEmpty == true ? mem['message'].toString() : 'Message');
+
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    CircleAvatar(
+                      radius: 14,
+                      backgroundColor: AppTheme.primaryTeal.withValues(alpha: 0.15),
+                      child: Text(
+                        (isMe ? 'You' : otherUserName).substring(0, 1).toUpperCase(),
+                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: AppTheme.primaryTeal),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${isMe ? "You" : otherUserName} • $label',
+                            style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800, color: AppTheme.primaryTeal),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(preview, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> fetchOtherUserStatus() async {
     try {
       final otherUserId = widget.currentUserId == 1 ? 2 : 1;
@@ -713,6 +850,30 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // NEW: Pinned Messages — toggle pin state for the given message
+  void _togglePinMessage(Map<String, dynamic> messageMap) {
+    final messageId = messageMap['id'];
+    if (messageId == null) return;
+
+    final bool isCurrentlyPinned = pinnedMessage != null && pinnedMessage!['id'].toString() == messageId.toString();
+
+    if (isCurrentlyPinned) {
+      socket?.emit('unpinMessage', {
+        'conversationId': widget.conversationId,
+        'messageId': messageId,
+      });
+    } else {
+      socket?.emit('pinMessage', {
+        'conversationId': widget.conversationId,
+        'messageId': messageId,
+      });
+    }
+
+    setState(() {
+      selectedMessage = null;
+    });
+  }
+
   void _startReplying(Map<String, dynamic> messageMap) {
     setState(() {
       replyingToMessage = messageMap;
@@ -744,6 +905,8 @@ class _ChatScreenState extends State<ChatScreen> {
   String _getReplyPreviewText(dynamic type, dynamic name, dynamic text, bool isDeleted) {
     if (isDeleted) return "This message was deleted";
     if (type == 'image') return "ðŸ“· Photo";
+    if (type == 'audio') return "\u{1F3A4} Voice message";
+    if (type == 'location') return "\u{1F4CD} Location";
     if (type == 'file') return "ðŸ“Ž ${name ?? 'File'}";
     if (text != null && text.toString().isNotEmpty) return text.toString();
     return "Message";
@@ -771,7 +934,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final token = await AuthService.ensureToken(widget.currentUserId);
 
     if (token == null || token.isEmpty) {
-      debugPrint('âš  Chat: Could not obtain token â€” running in local mode');
+      debugPrint('âš  Chat: Could not obtain token â€” running in local mode');
       return;
     }
     debugPrint('âœ… Chat socket: connecting...');
@@ -813,7 +976,7 @@ class _ChatScreenState extends State<ChatScreen> {
       debugPrint('[CHAT SOCKET] CONNECT ERROR: $err');
       if (!_hasLoggedOffline) {
         _hasLoggedOffline = true;
-        debugPrint('âš ï¸ Chat socket connect error: $err');
+        debugPrint('âš ï¸ Chat socket connect error: $err');
       }
     });
 
@@ -933,6 +1096,22 @@ class _ChatScreenState extends State<ChatScreen> {
           messages.add(newMessageMap);
         }
       });
+
+      // NEW: If this is the echo of a live-location message we just started
+      // sharing (we don't yet know its server-assigned id), capture it now
+      // and kick off the periodic position-update timer.
+      if (newMessageMap['isMe'] == true &&
+          newMessageMap['attachmentType'] == 'location' &&
+          _isSharingLiveLocation &&
+          _activeLiveLocationMessageId == null) {
+        try {
+          final parsed = jsonDecode(newMessageMap['message']?.toString() ?? '{}');
+          if (parsed['isLive'] == true) {
+            _activeLiveLocationMessageId = int.tryParse(newMessageMap['id'].toString());
+            _startLiveLocationUpdateTimer();
+          }
+        } catch (_) {}
+      }
 
       debugPrint("=== SOCKET MESSAGE CHECK ===");
       debugPrint("Message ID: ${newMessageMap['id']}");
@@ -1107,6 +1286,102 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() {
           isVanishMode = newVanishState;
         });
+      }
+    });
+
+    // NEW: Disappearing Messages — server tells us the conversation's current timer
+    socket?.on('disappearingTimerUpdate', (data) {
+      if (data == null) return;
+      final convId = data['conversationId'];
+      if (convId != null && convId.toString() != widget.conversationId.toString()) return;
+
+      final rawSeconds = data['timerSeconds'];
+      final int? seconds = rawSeconds != null ? int.tryParse(rawSeconds.toString()) : null;
+
+      if (!mounted) return;
+      setState(() {
+        disappearingTimerSeconds = (seconds != null && seconds > 0) ? seconds : null;
+        disappearingTimer = _disappearingTimerLabel(disappearingTimerSeconds);
+      });
+    });
+
+    // NEW: Pinned Messages
+    socket?.on('messagePinned', (data) {
+      if (data == null) return;
+      final convId = data['conversationId'];
+      if (convId != null && convId.toString() != widget.conversationId.toString()) return;
+
+      final msgData = data['message'];
+      if (msgData == null) return;
+
+      if (!mounted) return;
+      setState(() {
+        pinnedMessage = Map<String, dynamic>.from(msgData);
+        for (var m in messages) {
+          m['isPinned'] = m['id'] != null && m['id'].toString() == pinnedMessage!['id'].toString();
+        }
+      });
+    });
+
+    socket?.on('messageUnpinned', (data) {
+      if (data == null) return;
+      final convId = data['conversationId'];
+      if (convId != null && convId.toString() != widget.conversationId.toString()) return;
+
+      if (!mounted) return;
+      setState(() {
+        pinnedMessage = null;
+        for (var m in messages) {
+          m['isPinned'] = false;
+        }
+      });
+    });
+
+    // NEW: Live Location Sharing
+    socket?.on('liveLocationUpdate', (data) {
+      if (data == null) return;
+      final convId = data['conversationId'];
+      if (convId != null && convId.toString() != widget.conversationId.toString()) return;
+
+      final msgId = data['messageId'];
+      final lat = data['latitude'];
+      final lng = data['longitude'];
+      if (msgId == null) return;
+
+      if (!mounted) return;
+      setState(() {
+        for (var m in messages) {
+          if (m['id'] != null && m['id'].toString() == msgId.toString()) {
+            m['message'] = jsonEncode({'lat': lat, 'lng': lng, 'isLive': true});
+          }
+        }
+      });
+    });
+
+    socket?.on('liveLocationEnded', (data) {
+      if (data == null) return;
+      final convId = data['conversationId'];
+      if (convId != null && convId.toString() != widget.conversationId.toString()) return;
+
+      final msgId = data['messageId'];
+      if (msgId == null) return;
+
+      if (!mounted) return;
+      setState(() {
+        for (var m in messages) {
+          if (m['id'] != null && m['id'].toString() == msgId.toString()) {
+            try {
+              final parsed = jsonDecode(m['message']?.toString() ?? '{}');
+              parsed['isLive'] = false;
+              m['message'] = jsonEncode(parsed);
+            } catch (_) {}
+          }
+        }
+      });
+      // If this was our own active share, stop the local update timer too
+      // (done outside setState because it calls setState itself)
+      if (_activeLiveLocationMessageId != null && _activeLiveLocationMessageId.toString() == msgId.toString()) {
+        _stopSharingLiveLocationLocal();
       }
     });
 
@@ -1289,10 +1564,126 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // =========================
+  // VOICE MESSAGE RECORDING
+  // =========================
+
+  Future<void> _startVoiceRecording() async {
+    try {
+      final hasPermission = await _audioRecorder.hasPermission();
+      if (!hasPermission) {
+        _showErrorSnackBar("Microphone permission is required to record voice messages");
+        return;
+      }
+
+      final dir = await getTemporaryDirectory();
+      final filePath = '${dir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+
+      await _audioRecorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          bitRate: 128000,
+          sampleRate: 44100,
+        ),
+        path: filePath,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _isRecordingVoice = true;
+        _recordingFilePath = filePath;
+        _recordingSeconds = 0;
+      });
+
+      _recordingTimer?.cancel();
+      _recordingTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (mounted) {
+          setState(() => _recordingSeconds++);
+        }
+      });
+    } catch (e) {
+      debugPrint("Error starting voice recording: $e");
+      _showErrorSnackBar("Could not start recording: $e");
+    }
+  }
+
+  Future<void> _stopVoiceRecordingAndSend({bool cancel = false}) async {
+    if (!_isRecordingVoice) return;
+    _recordingTimer?.cancel();
+
+    try {
+      final path = await _audioRecorder.stop();
+
+      if (!mounted) return;
+      setState(() {
+        _isRecordingVoice = false;
+      });
+
+      if (cancel || path == null) {
+        if (path != null && !kIsWeb) {
+          final f = File(path);
+          if (await f.exists()) {
+            try { await f.delete(); } catch (_) {}
+          }
+        }
+        return;
+      }
+
+      // Too short a recording is treated as accidental — discard it
+      if (_recordingSeconds < 1) {
+        if (!kIsWeb) {
+          final f = File(path);
+          if (await f.exists()) {
+            try { await f.delete(); } catch (_) {}
+          }
+        }
+        _showErrorSnackBar("Recording too short");
+        return;
+      }
+
+      final bytes = await File(path).readAsBytes();
+      final fileName = 'voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+
+      _uploadAndSendFile(
+        filePath: path,
+        fileBytes: bytes,
+        fileName: fileName,
+        attachmentType: 'audio',
+        fileSize: bytes.length,
+      );
+    } catch (e) {
+      debugPrint("Error stopping voice recording: $e");
+      _showErrorSnackBar("Could not send voice message: $e");
+    }
+  }
+
+  String _formatRecordingDuration(int seconds) {
+    final m = (seconds ~/ 60).toString().padLeft(2, '0');
+    final s = (seconds % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
   @override
   void dispose() {
     _typingTimer?.cancel();
+    _recordingTimer?.cancel();
+    _liveLocationTimer?.cancel();
+    if (_isRecordingVoice) {
+      _audioRecorder.stop();
+    }
+    _audioRecorder.dispose();
     if (socket != null) {
+      // Leaving the chat screen ends any live-location share we started
+      if (_isSharingLiveLocation && _activeLiveLocationMessageId != null) {
+        socket!.emit('stopLiveLocation', {
+          'conversationId': widget.conversationId,
+          'messageId': _activeLiveLocationMessageId,
+        });
+      }
+      socket!.off('messagePinned');
+      socket!.off('messageUnpinned');
+      socket!.off('liveLocationUpdate');
+      socket!.off('liveLocationEnded');
       socket!.off('typing');
       socket!.off('stopTyping');
       socket!.off('newMessage');
@@ -1304,6 +1695,7 @@ class _ChatScreenState extends State<ChatScreen> {
       socket!.off('userOnline');
       socket!.off('userOffline');
       socket!.off('unreadCountUpdate');
+      socket!.off('disappearingTimerUpdate');
       socket!.disconnect();
       socket!.dispose();
     }
@@ -1402,10 +1794,20 @@ class _ChatScreenState extends State<ChatScreen> {
                 _buildMenuItem(
                   icon: Icons.auto_awesome_rounded,
                   iconColor: isVanishMode ? const Color(0xFFE040FB) : Colors.white,
-                  title: isVanishMode ? 'Turn off Vanish mode â˜€ï¸' : 'Vanish mode (Swipe up in chat) ðŸ”®',
+                  title: isVanishMode ? 'Turn off Vanish mode â˜€ï¸' : 'Vanish mode (Swipe up in chat) ðŸ”®',
                   onTap: () {
                     Navigator.pop(ctx);
                     _toggleVanishMode(!isVanishMode);
+                  },
+                ),
+                _buildMenuItem(
+                  icon: Icons.timer_outlined,
+                  iconColor: disappearingTimerSeconds != null ? AppTheme.primaryTeal : Colors.white,
+                  title: 'Disappearing messages ($disappearingTimer)',
+                  hasTrailingArrow: true,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showDisappearingTimerDialog();
                   },
                 ),
                 _buildMenuItem(
@@ -1611,6 +2013,20 @@ class _ChatScreenState extends State<ChatScreen> {
                 leading: const Icon(Icons.perm_media_rounded, color: AppTheme.primaryTeal),
                 title: const Text('Media & Files', style: TextStyle(fontWeight: FontWeight.w800)),
                 subtitle: Text('$mediaCount Photos â€¢ $fileCount Documents', style: const TextStyle(fontWeight: FontWeight.w600)),
+                trailing: const Icon(Icons.arrow_forward_ios_rounded, size: 16),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => MediaGalleryScreen(
+                        currentUserId: widget.currentUserId,
+                        conversationId: widget.conversationId,
+                        peerName: peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1'),
+                      ),
+                    ),
+                  );
+                },
               ),
               ListTile(
                 leading: const Icon(Icons.lock_outline_rounded, color: AppTheme.primaryTeal),
@@ -1770,13 +2186,120 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
             const SizedBox(width: 10),
             Text(
-              isVanishMode ? "Vanish Mode ON ðŸ”® (Swipe up to turn off)" : "Vanish Mode OFF â˜€ï¸",
+              isVanishMode ? "Vanish Mode ON ðŸ”® (Swipe up to turn off)" : "Vanish Mode OFF â˜€ï¸",
               style: const TextStyle(fontWeight: FontWeight.w900),
             ),
           ],
         ),
         backgroundColor: isVanishMode ? const Color(0xFF2C1338) : AppTheme.primaryTeal,
         duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  // ==================================================
+  // DISAPPEARING MESSAGES
+  // ==================================================
+
+  String _disappearingTimerLabel(int? seconds) {
+    if (seconds == null || seconds <= 0) return 'Off';
+    if (seconds == 24 * 3600) return '24 Hours';
+    if (seconds == 7 * 24 * 3600) return '7 Days';
+    if (seconds == 90 * 24 * 3600) return '90 Days';
+    // Fallback for any custom value synced from elsewhere
+    final days = seconds / (24 * 3600);
+    if (days >= 1) return '${days.toStringAsFixed(0)} Days';
+    final hours = seconds / 3600;
+    return '${hours.toStringAsFixed(0)} Hours';
+  }
+
+  void _setDisappearingTimer(int? seconds) {
+    socket?.emit('setDisappearingTimer', {
+      'conversationId': widget.conversationId,
+      'timerSeconds': seconds,
+    });
+    setState(() {
+      disappearingTimerSeconds = seconds;
+      disappearingTimer = _disappearingTimerLabel(seconds);
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.timer_outlined, color: Colors.white),
+            const SizedBox(width: 10),
+            Text(
+              seconds == null
+                  ? "Disappearing messages turned OFF"
+                  : "New messages will disappear after ${_disappearingTimerLabel(seconds)}",
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+          ],
+        ),
+        backgroundColor: AppTheme.primaryTeal,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  void _showDisappearingTimerDialog() {
+    final options = <String, int?>{
+      'Off': null,
+      '24 Hours': 24 * 3600,
+      '7 Days': 7 * 24 * 3600,
+      '90 Days': 90 * 24 * 3600,
+    };
+
+    showDialog(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.timer_outlined, color: AppTheme.primaryTeal),
+            SizedBox(width: 8),
+            Text('Disappearing Messages', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+          ],
+        ),
+        children: [
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+            child: Text(
+              'Messages sent after turning this on will automatically delete for both of you.',
+              style: TextStyle(fontSize: 12.5, color: Colors.grey),
+            ),
+          ),
+          const SizedBox(height: 8),
+          ...options.entries.map((entry) {
+            final bool isSelected = disappearingTimerSeconds == entry.value;
+            return SimpleDialogOption(
+              onPressed: () {
+                Navigator.pop(ctx);
+                _setDisappearingTimer(entry.value);
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    Icon(
+                      isSelected ? Icons.radio_button_checked_rounded : Icons.radio_button_off_rounded,
+                      color: isSelected ? AppTheme.primaryTeal : Colors.grey,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      entry.key,
+                      style: TextStyle(
+                        fontWeight: isSelected ? FontWeight.w900 : FontWeight.w600,
+                        fontSize: 15,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }),
+        ],
       ),
     );
   }
@@ -1788,7 +2311,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final otherUserName = widget.currentUserId == 1 ? 'Leslie' : 'User 1';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(isFavourite ? 'Added $otherUserName to Favourites â¤ï¸' : 'Removed $otherUserName from Favourites'),
+        content: Text(isFavourite ? 'Added $otherUserName to Favourites â¤ï¸' : 'Removed $otherUserName from Favourites'),
         backgroundColor: AppTheme.primaryTeal,
       ),
     );
@@ -1807,7 +2330,7 @@ class _ChatScreenState extends State<ChatScreen> {
               });
               Navigator.pop(ctx);
               ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Contact added to $category ðŸ–¼ï¸'), backgroundColor: AppTheme.primaryTeal),
+                SnackBar(content: Text('Contact added to $category ðŸ–¼ï¸'), backgroundColor: AppTheme.primaryTeal),
               );
             },
             child: Padding(
@@ -2176,7 +2699,22 @@ class _ChatScreenState extends State<ChatScreen> {
                 ? Map<String, dynamic>.from(item['reactions'])
                 : <String, dynamic>{};
 
-            final rawText = item['message'] ?? '';
+            final bool isPinnedItem = item['is_pinned'] == true;
+            final bool liveStillActive = item['live_location_active'] == true;
+
+            String rawText = (item['message'] ?? '').toString();
+            // Live-location messages: the server keeps the last JSON payload with
+            // isLive:true even after sharing ends, so trust the DB flag instead.
+            if ((item['attachment_type'] ?? item['attachmentType']) == 'location' && !liveStillActive) {
+              try {
+                final locJson = jsonDecode(rawText);
+                if (locJson is Map && locJson['isLive'] == true) {
+                  locJson['isLive'] = false;
+                  rawText = jsonEncode(locJson);
+                }
+              } catch (_) {}
+            }
+
             final msgId = item['id'];
             final decryptedText = isDeleted
                 ? 'This message was deleted'
@@ -2218,6 +2756,7 @@ class _ChatScreenState extends State<ChatScreen> {
               'isDeleted': isDeleted,
               'is_deleted': isDeleted,
               'reactions': reactions,
+              'isPinned': isPinnedItem,
               'time': _formatTime(rawTime),
             };
           }).toList();
@@ -2239,6 +2778,15 @@ class _ChatScreenState extends State<ChatScreen> {
             messages.clear();
             messages.addAll(parsedMessages);
             isLoading = false;
+
+            // Restore the pinned-message banner after an app restart / reload
+            pinnedMessage = null;
+            for (final raw in fetchedData) {
+              if (raw['is_pinned'] == true && raw['is_deleted'] != true) {
+                pinnedMessage = Map<String, dynamic>.from(raw as Map);
+                break;
+              }
+            }
           });
 
           _scrollToBottom();
@@ -2444,6 +2992,218 @@ class _ChatScreenState extends State<ChatScreen> {
       debugPrint("FILE PICKER ERROR: $e");
       debugPrint("FILE PICKER STACK TRACE: $stackTrace");
       _showErrorSnackBar("Could not open file picker: $e");
+    }
+  }
+
+  // ==================================================
+  // LIVE LOCATION SHARING
+  // ==================================================
+
+  Future<bool> _ensureLocationPermission() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      _showErrorSnackBar("Please turn on Location Services to share your location");
+      return false;
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        _showErrorSnackBar("Location permission denied");
+        return false;
+      }
+    }
+    if (permission == LocationPermission.deniedForever) {
+      _showPermissionDeniedDialog(
+        title: "Location Permission Required",
+        message: "Location access has been permanently denied. Please grant it in App Settings to share your location.",
+      );
+      return false;
+    }
+    return true;
+  }
+
+  void _showLocationShareSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final isDark = Theme.of(context).brightness == Brightness.dark;
+        return SafeArea(
+          child: Container(
+            margin: const EdgeInsets.all(16),
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF1F2C33) : Colors.white,
+              borderRadius: BorderRadius.circular(24),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(2)),
+                ),
+                ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor: AppTheme.primaryTeal,
+                    child: Icon(Icons.location_on_rounded, color: Colors.white),
+                  ),
+                  title: const Text('Share current location', style: TextStyle(fontWeight: FontWeight.w800)),
+                  subtitle: const Text('Send your location once, right now'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _shareLocation(durationSeconds: null);
+                  },
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor: Color(0xFF0F766E),
+                    child: Icon(Icons.my_location_rounded, color: Colors.white),
+                  ),
+                  title: const Text('Share live location — 15 min', style: TextStyle(fontWeight: FontWeight.w800)),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _shareLocation(durationSeconds: 15 * 60);
+                  },
+                ),
+                ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor: Color(0xFF0F766E),
+                    child: Icon(Icons.my_location_rounded, color: Colors.white),
+                  ),
+                  title: const Text('Share live location — 1 hour', style: TextStyle(fontWeight: FontWeight.w800)),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _shareLocation(durationSeconds: 60 * 60);
+                  },
+                ),
+                ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor: Color(0xFF0F766E),
+                    child: Icon(Icons.my_location_rounded, color: Colors.white),
+                  ),
+                  title: const Text('Share live location — 8 hours', style: TextStyle(fontWeight: FontWeight.w800)),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _shareLocation(durationSeconds: 8 * 60 * 60);
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _shareLocation({int? durationSeconds}) async {
+    if (_isSharingLiveLocation) {
+      _showErrorSnackBar("You're already sharing your live location");
+      return;
+    }
+
+    final hasPermission = await _ensureLocationPermission();
+    if (!hasPermission) return;
+
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+      );
+
+      final isLive = durationSeconds != null && durationSeconds > 0;
+
+      if (isLive) {
+        setState(() {
+          _isSharingLiveLocation = true;
+          _activeLiveLocationMessageId = null; // learned once the server echoes newMessage
+          _liveLocationEndTime = DateTime.now().add(Duration(seconds: durationSeconds));
+        });
+      }
+
+      socket?.emit('shareLiveLocation', {
+        'conversationId': widget.conversationId,
+        'latitude': position.latitude,
+        'longitude': position.longitude,
+        'durationSeconds': durationSeconds,
+      });
+
+      if (!isLive) {
+        _showErrorSnackBar("Location shared ✅");
+      }
+    } catch (e) {
+      debugPrint("Error sharing location: $e");
+      _showErrorSnackBar("Could not get your current location: $e");
+      if (mounted) {
+        setState(() {
+          _isSharingLiveLocation = false;
+        });
+      }
+    }
+  }
+
+  void _startLiveLocationUpdateTimer() {
+    _liveLocationTimer?.cancel();
+    _liveLocationTimer = Timer.periodic(const Duration(seconds: 15), (timer) async {
+      if (!_isSharingLiveLocation || _activeLiveLocationMessageId == null) {
+        timer.cancel();
+        return;
+      }
+      // Auto-stop once the chosen duration has elapsed (server also enforces this)
+      if (_liveLocationEndTime != null && DateTime.now().isAfter(_liveLocationEndTime!)) {
+        _stopSharingLiveLocation();
+        return;
+      }
+      try {
+        final position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        );
+        socket?.emit('updateLiveLocation', {
+          'conversationId': widget.conversationId,
+          'messageId': _activeLiveLocationMessageId,
+          'latitude': position.latitude,
+          'longitude': position.longitude,
+        });
+      } catch (e) {
+        debugPrint("Error updating live location: $e");
+      }
+    });
+  }
+
+  void _stopSharingLiveLocation() {
+    if (_activeLiveLocationMessageId != null) {
+      socket?.emit('stopLiveLocation', {
+        'conversationId': widget.conversationId,
+        'messageId': _activeLiveLocationMessageId,
+      });
+    }
+    _stopSharingLiveLocationLocal();
+  }
+
+  void _stopSharingLiveLocationLocal() {
+    _liveLocationTimer?.cancel();
+    _liveLocationTimer = null;
+    if (mounted) {
+      setState(() {
+        _isSharingLiveLocation = false;
+        _activeLiveLocationMessageId = null;
+        _liveLocationEndTime = null;
+      });
+    }
+  }
+
+  Future<void> _openLocationInMaps(double lat, double lng) async {
+    final uri = Uri.parse('https://www.google.com/maps/search/?api=1&query=$lat,$lng');
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (e) {
+      debugPrint("Error opening maps: $e");
+      _showErrorSnackBar("Could not open maps");
     }
   }
 
@@ -2711,8 +3471,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
                 const SizedBox(height: 24),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                Wrap(
+                  alignment: WrapAlignment.spaceEvenly,
+                  runSpacing: 8,
                   children: [
                     _buildAttachmentGridItem(
                       icon: Icons.camera_alt_rounded,
@@ -2742,6 +3503,16 @@ class _ChatScreenState extends State<ChatScreen> {
                         debugPrint("FILE OPTION CLICKED");
                         Navigator.pop(ctx);
                         _pickFile();
+                      },
+                    ),
+                    _buildAttachmentGridItem(
+                      icon: Icons.location_on_rounded,
+                      label: "Location",
+                      color: const Color(0xFFE53935),
+                      onTap: () {
+                        debugPrint("LOCATION OPTION CLICKED");
+                        Navigator.pop(ctx);
+                        _showLocationShareSheet();
                       },
                     ),
                   ],
@@ -3006,6 +3777,19 @@ class _ChatScreenState extends State<ChatScreen> {
                       tooltip: 'Reply',
                       onPressed: () => _startReplying(selectedMessage!),
                     ),
+                    if (selectedMessage!['isDeleted'] != true)
+                      IconButton(
+                        icon: Icon(
+                          (pinnedMessage != null && pinnedMessage!['id'].toString() == selectedMessage!['id'].toString())
+                              ? Icons.push_pin_rounded
+                              : Icons.push_pin_outlined,
+                          color: Colors.white,
+                        ),
+                        tooltip: (pinnedMessage != null && pinnedMessage!['id'].toString() == selectedMessage!['id'].toString())
+                            ? 'Unpin'
+                            : 'Pin',
+                        onPressed: () => _togglePinMessage(selectedMessage!),
+                      ),
                     if (selectedMessage!['message'] != null && selectedMessage!['message'].toString().isNotEmpty)
                       IconButton(
                         icon: const Icon(Icons.copy_rounded, color: Colors.white),
@@ -3169,6 +3953,51 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
 
+            // NEW: Pinned Message Banner
+            if (pinnedMessage != null)
+              InkWell(
+                onTap: () => _scrollToMessage(pinnedMessage!['id']),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  color: isDark ? const Color(0xFF1A252B) : const Color(0xFFE9EDEF),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.push_pin_rounded, color: AppTheme.primaryTeal, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Pinned Message',
+                              style: TextStyle(color: AppTheme.primaryTeal, fontWeight: FontWeight.w900, fontSize: 11.5),
+                            ),
+                            Text(
+                              pinnedMessage!['attachment_type'] == 'image'
+                                  ? '📷 Photo'
+                                  : pinnedMessage!['attachment_type'] == 'audio'
+                                      ? '🎤 Voice message'
+                                      : pinnedMessage!['attachment_type'] == 'file'
+                                          ? '📎 ${pinnedMessage!['attachment_name'] ?? 'File'}'
+                                          : pinnedMessage!['attachment_type'] == 'location'
+                                              ? '📍 Location'
+                                              : (pinnedMessage!['message']?.toString().isNotEmpty == true ? pinnedMessage!['message'].toString() : 'Message'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: isDark ? Colors.white : const Color(0xFF111B21)),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        icon: Icon(Icons.close_rounded, size: 18, color: isDark ? Colors.white70 : const Color(0xFF54656F)),
+                        onPressed: () => _togglePinMessage(pinnedMessage!),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
             // In-Chat Live Search Bar Overlay
             if (isSearchingInChat)
               Container(
@@ -3298,6 +4127,82 @@ class _ChatScreenState extends State<ChatScreen> {
                                     ),
                                   ),
                                 ],
+                              ),
+                            ),
+
+                          // Disappearing Messages Banner Header
+                          if (disappearingTimerSeconds != null)
+                            Container(
+                              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                              decoration: BoxDecoration(
+                                color: AppTheme.primaryTeal.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(color: AppTheme.primaryTeal.withValues(alpha: 0.4), width: 1.2),
+                              ),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(8),
+                                    decoration: const BoxDecoration(
+                                      color: AppTheme.primaryTeal,
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: const Icon(Icons.timer_outlined, color: Colors.white, size: 18),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      'Disappearing messages are ON — new messages vanish after $disappearingTimer',
+                                      style: const TextStyle(
+                                        color: AppTheme.primaryTeal,
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 12.5,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+
+                          // "On This Day" Memories Banner
+                          if (showOnThisDayBanner && onThisDayMemories.isNotEmpty)
+                            Container(
+                              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: [
+                                    Colors.amber.withValues(alpha: 0.18),
+                                    Colors.orange.withValues(alpha: 0.10),
+                                  ],
+                                ),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(color: Colors.amber.withValues(alpha: 0.5), width: 1.2),
+                              ),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(20),
+                                onTap: _showOnThisDayDialog,
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.all(8),
+                                      decoration: const BoxDecoration(color: Colors.amber, shape: BoxShape.circle),
+                                      child: const Icon(Icons.auto_awesome_rounded, color: Colors.white, size: 18),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Text(
+                                        'On this day — ${onThisDayMemories.length} memor${onThisDayMemories.length == 1 ? "y" : "ies"} to look back on. Tap to view.',
+                                        style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12.5),
+                                      ),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.close_rounded, size: 18),
+                                      onPressed: () => setState(() => showOnThisDayBanner = false),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
 
@@ -3594,6 +4499,95 @@ class _ChatScreenState extends State<ChatScreen> {
                                                         ),
                                                       ),
                                                     ),
+                                                ] else if (!isDeleted && message['attachmentType'] == 'location') ...[
+                                                  Builder(
+                                                    builder: (context) {
+                                                      Map<String, dynamic> locData = {};
+                                                      try {
+                                                        locData = jsonDecode(message['message']?.toString() ?? '{}');
+                                                      } catch (_) {}
+                                                      final double? lat = (locData['lat'] as num?)?.toDouble();
+                                                      final double? lng = (locData['lng'] as num?)?.toDouble();
+                                                      final bool isLive = locData['isLive'] == true;
+                                                      final Color fg = isMe ? Colors.white : AppTheme.primaryTeal;
+
+                                                      return InkWell(
+                                                        borderRadius: BorderRadius.circular(12),
+                                                        onTap: (lat != null && lng != null) ? () => _openLocationInMaps(lat, lng) : null,
+                                                        child: Container(
+                                                          width: 220,
+                                                          padding: const EdgeInsets.all(12),
+                                                          decoration: BoxDecoration(
+                                                            color: isMe ? Colors.black.withValues(alpha: 0.15) : (isDark ? Colors.black26 : Colors.white60),
+                                                            borderRadius: BorderRadius.circular(12),
+                                                          ),
+                                                          child: Column(
+                                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                                            children: [
+                                                              Row(
+                                                                children: [
+                                                                  Icon(
+                                                                    isLive ? Icons.my_location_rounded : Icons.location_on_rounded,
+                                                                    color: isLive ? Colors.redAccent : fg,
+                                                                    size: 20,
+                                                                  ),
+                                                                  const SizedBox(width: 6),
+                                                                  Text(
+                                                                    isLive ? 'Live Location' : 'Location',
+                                                                    style: TextStyle(fontWeight: FontWeight.w900, fontSize: 13.5, color: fg),
+                                                                  ),
+                                                                  if (isLive) ...[
+                                                                    const SizedBox(width: 6),
+                                                                    Container(
+                                                                      width: 6,
+                                                                      height: 6,
+                                                                      decoration: const BoxDecoration(color: Colors.redAccent, shape: BoxShape.circle),
+                                                                    ),
+                                                                  ],
+                                                                ],
+                                                              ),
+                                                              const SizedBox(height: 6),
+                                                              Text(
+                                                                lat != null && lng != null
+                                                                    ? '${lat.toStringAsFixed(5)}, ${lng.toStringAsFixed(5)}'
+                                                                    : 'Location unavailable',
+                                                                style: TextStyle(fontSize: 11.5, color: fg.withValues(alpha: 0.85), fontWeight: FontWeight.w600),
+                                                              ),
+                                                              const SizedBox(height: 6),
+                                                              Text(
+                                                                'Tap to open in Maps',
+                                                                style: TextStyle(fontSize: 11, color: fg.withValues(alpha: 0.7), fontStyle: FontStyle.italic),
+                                                              ),
+                                                              if (isMe && isLive && _activeLiveLocationMessageId != null && _activeLiveLocationMessageId.toString() == message['id'].toString()) ...[
+                                                                const SizedBox(height: 8),
+                                                                GestureDetector(
+                                                                  onTap: _stopSharingLiveLocation,
+                                                                  child: Container(
+                                                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                                                    decoration: BoxDecoration(
+                                                                      color: Colors.redAccent,
+                                                                      borderRadius: BorderRadius.circular(8),
+                                                                    ),
+                                                                    child: const Text(
+                                                                      'Stop Sharing',
+                                                                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 11.5),
+                                                                    ),
+                                                                  ),
+                                                                ),
+                                                              ],
+                                                            ],
+                                                          ),
+                                                        ),
+                                                      );
+                                                    },
+                                                  ),
+                                                ] else if (!isDeleted && message['attachmentUrl'] != null && message['attachmentType'] == 'audio') ...[
+                                                  _VoiceMessagePlayer(
+                                                    url: formattedImgUrl ?? '',
+                                                    isLocalFile: isLocalFile,
+                                                    isMe: isMe,
+                                                    headers: _authHeaders,
+                                                  ),
                                                 ] else if (!isDeleted && message['attachmentUrl'] != null && message['attachmentType'] == 'file') ...[
                                                   Builder(
                                                     builder: (context) {
@@ -3938,6 +4932,32 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
 
+            if (_isRecordingVoice)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                color: isDark ? const Color(0xFF1F2C33) : const Color(0xFFE9EDEF),
+                child: Row(
+                  children: [
+                    const Icon(Icons.fiber_manual_record_rounded, color: Colors.redAccent, size: 14),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        "Recording ${_formatRecordingDuration(_recordingSeconds)} — release mic to send",
+                        style: const TextStyle(
+                          color: AppTheme.primaryTeal,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: () => _stopVoiceRecordingAndSend(cancel: true),
+                      child: const Icon(Icons.close_rounded, size: 18, color: Colors.redAccent),
+                    ),
+                  ],
+                ),
+              ),
+
             // Bottom Wave Footer & Input Pill Bar
             ClipPath(
               clipper: WaveFooterClipper(),
@@ -4035,25 +5055,59 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                       ),
                       const SizedBox(width: 2),
-                      GestureDetector(
-                        onTap: sendMessage,
-                        child: Container(
-                          width: 42,
-                          height: 42,
-                          margin: const EdgeInsets.only(right: 5),
-                          decoration: const BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [Color(0xFF0F766E), Color(0xFF149B9B)],
+                      (messageController.text.trim().isEmpty && editingMessageId == null)
+                          ? GestureDetector(
+                              onLongPressStart: (_) => _startVoiceRecording(),
+                              onLongPressEnd: (_) => _stopVoiceRecordingAndSend(),
+                              onLongPressCancel: () => _stopVoiceRecordingAndSend(cancel: true),
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 150),
+                                width: _isRecordingVoice ? 52 : 42,
+                                height: _isRecordingVoice ? 52 : 42,
+                                margin: const EdgeInsets.only(right: 5),
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    colors: _isRecordingVoice
+                                        ? [Colors.redAccent, Colors.red.shade700]
+                                        : const [Color(0xFF0F766E), Color(0xFF149B9B)],
+                                  ),
+                                  shape: BoxShape.circle,
+                                  boxShadow: _isRecordingVoice
+                                      ? [
+                                          BoxShadow(
+                                            color: Colors.redAccent.withValues(alpha: 0.5),
+                                            blurRadius: 12,
+                                            spreadRadius: 2,
+                                          ),
+                                        ]
+                                      : null,
+                                ),
+                                child: Icon(
+                                  _isRecordingVoice ? Icons.mic_rounded : Icons.mic_none_rounded,
+                                  color: Colors.white,
+                                  size: _isRecordingVoice ? 24 : 20,
+                                ),
+                              ),
+                            )
+                          : GestureDetector(
+                              onTap: sendMessage,
+                              child: Container(
+                                width: 42,
+                                height: 42,
+                                margin: const EdgeInsets.only(right: 5),
+                                decoration: const BoxDecoration(
+                                  gradient: LinearGradient(
+                                    colors: [Color(0xFF0F766E), Color(0xFF149B9B)],
+                                  ),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: const Icon(
+                                  Icons.near_me_rounded,
+                                  color: Colors.white,
+                                  size: 20,
+                                ),
+                              ),
                             ),
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(
-                            Icons.near_me_rounded,
-                            color: Colors.white,
-                            size: 20,
-                          ),
-                        ),
-                      ),
                     ],
                   ),
                 ),
@@ -4093,7 +5147,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     Text(
                       !isVanishMode
                           ? (isVanishThresholdReached ? "Release to turn on Vanish mode ðŸ”®" : "Swipe up to turn on Vanish mode")
-                          : (isVanishThresholdReached ? "Release to turn off Vanish mode â˜€ï¸" : "Swipe up to turn off Vanish mode"),
+                          : (isVanishThresholdReached ? "Release to turn off Vanish mode â˜€ï¸" : "Swipe up to turn off Vanish mode"),
                       style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 13),
                     ),
                   ],
@@ -4128,5 +5182,170 @@ class _ChatScreenState extends State<ChatScreen> {
     ],
   ),
 );
+  }
+}
+
+// =========================
+// VOICE MESSAGE PLAYBACK WIDGET
+// =========================
+class _VoiceMessagePlayer extends StatefulWidget {
+  final String url;
+  final bool isLocalFile;
+  final bool isMe;
+  final Map<String, String> headers;
+
+  const _VoiceMessagePlayer({
+    required this.url,
+    required this.isLocalFile,
+    required this.isMe,
+    required this.headers,
+  });
+
+  @override
+  State<_VoiceMessagePlayer> createState() => _VoiceMessagePlayerState();
+}
+
+class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
+  final AudioPlayer _player = AudioPlayer();
+  bool _isPlaying = false;
+  bool _isLoaded = false;
+  Duration _duration = Duration.zero;
+  Duration _position = Duration.zero;
+
+  StreamSubscription? _durationSub;
+  StreamSubscription? _positionSub;
+  StreamSubscription? _completeSub;
+  StreamSubscription? _stateSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _durationSub = _player.onDurationChanged.listen((d) {
+      if (mounted) setState(() => _duration = d);
+    });
+    _positionSub = _player.onPositionChanged.listen((p) {
+      if (mounted) setState(() => _position = p);
+    });
+    _completeSub = _player.onPlayerComplete.listen((_) {
+      if (mounted) {
+        setState(() {
+          _isPlaying = false;
+          _position = Duration.zero;
+        });
+      }
+    });
+    _stateSub = _player.onPlayerStateChanged.listen((s) {
+      if (mounted) {
+        setState(() => _isPlaying = s == PlayerState.playing);
+      }
+    });
+  }
+
+  Future<void> _togglePlay() async {
+    try {
+      if (_isPlaying) {
+        await _player.pause();
+        return;
+      }
+      if (!_isLoaded) {
+        if (widget.isLocalFile && !kIsWeb) {
+          await _player.play(DeviceFileSource(widget.url));
+        } else {
+          await _player.play(UrlSource(widget.url));
+        }
+        _isLoaded = true;
+      } else {
+        await _player.resume();
+      }
+    } catch (e) {
+      debugPrint("Error playing voice message: $e");
+    }
+  }
+
+  String _fmt(Duration d) {
+    final m = d.inMinutes.toString().padLeft(2, '0');
+    final s = (d.inSeconds % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  @override
+  void dispose() {
+    _durationSub?.cancel();
+    _positionSub?.cancel();
+    _completeSub?.cancel();
+    _stateSub?.cancel();
+    _player.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final Color fg = widget.isMe ? Colors.white : AppTheme.primaryTeal;
+    final double progress = _duration.inMilliseconds > 0
+        ? (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0)
+        : 0.0;
+    final bool hasElapsed = _isPlaying || _position.inMilliseconds > 0;
+
+    return SizedBox(
+      width: 210,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          GestureDetector(
+            onTap: _togglePlay,
+            child: Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: widget.isMe
+                    ? Colors.white.withValues(alpha: 0.25)
+                    : AppTheme.primaryTeal.withValues(alpha: 0.15),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                color: fg,
+                size: 22,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: progress,
+                    minHeight: 4,
+                    backgroundColor: fg.withValues(alpha: 0.2),
+                    valueColor: AlwaysStoppedAnimation<Color>(fg),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Icon(Icons.mic_rounded, size: 12, color: fg.withValues(alpha: 0.7)),
+                    const SizedBox(width: 3),
+                    Text(
+                      _duration.inMilliseconds > 0
+                          ? _fmt(hasElapsed ? _position : _duration)
+                          : 'Voice message',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: fg.withValues(alpha: 0.85),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

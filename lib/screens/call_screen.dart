@@ -42,6 +42,13 @@ class _CallScreenState extends State<CallScreen> {
   bool _isCallConnected = false;
   String _callStatus = 'Connecting...';
 
+  // ---- NEW: Call duration timer state ----
+  Timer? _callTimer;
+  int _callDurationSeconds = 0;
+
+  // ---- NEW: Auto ICE-restart-on-failure state ----
+  bool _iceRestartAttempted = false;
+
   final List<RTCIceCandidate> _pendingIceCandidates = [];
 
   @override
@@ -87,10 +94,41 @@ class _CallScreenState extends State<CallScreen> {
       _localRenderer.srcObject = _localStream;
 
       // Setup WebRTC Peer Connection
+      // STUN alone only works when both peers are on "open" networks. Many
+      // real-world networks (mobile data, office/college WiFi, symmetric
+      // NAT) block the direct peer-to-peer path entirely, so a TURN relay
+      // is required as a fallback — without one, calls silently fail to
+      // connect for a large fraction of real users.
+      // Using Open Relay Project's free, public TURN servers here (no
+      // signup, no cost). For heavier production use, swap these for your
+      // own Metered.ca dashboard credentials or a self-hosted coturn.
       final configuration = <String, dynamic>{
         'iceServers': [
-          {'urls': ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302']}
-        ]
+          {
+            'urls': ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'],
+          },
+          {
+            'urls': 'stun:openrelay.metered.ca:80',
+          },
+          {
+            'urls': 'turn:openrelay.metered.ca:80',
+            'username': 'openrelayproject',
+            'credential': 'openrelayproject',
+          },
+          {
+            'urls': 'turn:openrelay.metered.ca:443',
+            'username': 'openrelayproject',
+            'credential': 'openrelayproject',
+          },
+          {
+            'urls': 'turn:openrelay.metered.ca:443?transport=tcp',
+            'username': 'openrelayproject',
+            'credential': 'openrelayproject',
+          },
+        ],
+        // Prefer relay only as a last resort — try direct/STUN paths first,
+        // fall back to TURN relay automatically when they fail.
+        'iceTransportPolicy': 'all',
       };
 
       _peerConnection = await createPeerConnection(configuration);
@@ -108,6 +146,7 @@ class _CallScreenState extends State<CallScreen> {
             _isCallConnected = true;
             _callStatus = 'Connected';
           });
+          _startCallTimerIfNeeded(); // NEW
         }
       };
 
@@ -124,15 +163,25 @@ class _CallScreenState extends State<CallScreen> {
       _peerConnection?.onIceConnectionState = (RTCIceConnectionState state) {
         debugPrint("WebRTC ICE State: $state");
         if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+          _iceRestartAttempted = false; // reset once a good connection is (re)established
           setState(() {
             _isCallConnected = true;
             _callStatus = 'Connected';
           });
-        } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
-            state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-          setState(() {
-            _callStatus = 'Connection error';
-          });
+          _startCallTimerIfNeeded(); // NEW
+        } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+          // A brief network hiccup — WebRTC often recovers this on its own
+          // within a few seconds without any action needed.
+          if (mounted && _isCallConnected) {
+            setState(() {
+              _callStatus = 'Reconnecting...';
+            });
+          }
+        } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+          // The path genuinely failed (e.g. NAT/firewall change mid-call).
+          // Try one automatic ICE restart before giving up — this re-runs
+          // negotiation and often recovers the call transparently.
+          _attemptIceRestart();
         }
       };
 
@@ -188,6 +237,16 @@ class _CallScreenState extends State<CallScreen> {
       }
     });
 
+    // ---- NEW: Missed call (ring timeout on server side) ----
+    widget.socket?.on('callMissed', (data) {
+      if (mounted) {
+        setState(() {
+          _callStatus = 'No Answer';
+        });
+        Future.delayed(const Duration(seconds: 1), _endCallLocal);
+      }
+    });
+
     widget.socket?.on('webrtcOffer', (data) async {
       if (mounted && !widget.isCaller && data != null && data['sdp'] != null) {
         await _handleOffer(data['sdp']);
@@ -230,6 +289,53 @@ class _CallScreenState extends State<CallScreen> {
     });
   }
 
+  // ---- NEW: One automatic ICE restart attempt on connection failure ----
+  // Only the caller side initiates the restart offer, to avoid both sides
+  // racing to renegotiate at once. Only ever attempted once per call to
+  // avoid endless retry loops on a genuinely dead connection.
+  Future<void> _attemptIceRestart() async {
+    if (_iceRestartAttempted || _peerConnection == null) {
+      if (mounted) {
+        setState(() {
+          _callStatus = 'Connection error';
+        });
+      }
+      return;
+    }
+    _iceRestartAttempted = true;
+
+    if (mounted) {
+      setState(() {
+        _callStatus = 'Reconnecting...';
+      });
+    }
+
+    try {
+      if (widget.isCaller) {
+        final offer = await _peerConnection!.createOffer({
+          'offerToReceiveVideo': widget.isVideoCall ? 1 : 0,
+          'offerToReceiveAudio': 1,
+          'iceRestart': true,
+        });
+        await _peerConnection!.setLocalDescription(offer);
+        widget.socket?.emit('webrtcOffer', {
+          'conversationId': widget.conversationId,
+          'sdp': offer.toMap(),
+        });
+        debugPrint("ICE restart offer sent");
+      }
+      // The callee side simply waits for the caller's restart offer and
+      // handles it through the existing _handleOffer/_handleAnswer flow.
+    } catch (e) {
+      debugPrint("Error attempting ICE restart: $e");
+      if (mounted) {
+        setState(() {
+          _callStatus = 'Connection error';
+        });
+      }
+    }
+  }
+
   Future<void> _createOffer() async {
     try {
       if (_peerConnection == null) return;
@@ -269,6 +375,7 @@ class _CallScreenState extends State<CallScreen> {
         _isCallConnected = true;
         _callStatus = 'Connected';
       });
+      _startCallTimerIfNeeded(); // NEW
     } catch (e) {
       debugPrint("Error handling WebRTC offer: $e");
     }
@@ -289,9 +396,26 @@ class _CallScreenState extends State<CallScreen> {
         _isCallConnected = true;
         _callStatus = 'Connected';
       });
+      _startCallTimerIfNeeded(); // NEW
     } catch (e) {
       debugPrint("Error handling WebRTC answer: $e");
     }
+  }
+
+  // ---- NEW: Call duration timer helpers ----
+  void _startCallTimerIfNeeded() {
+    if (_callTimer != null) return;
+    _callTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) {
+        setState(() => _callDurationSeconds++);
+      }
+    });
+  }
+
+  String _formatDuration(int seconds) {
+    final m = (seconds ~/ 60).toString().padLeft(2, '0');
+    final s = (seconds % 60).toString().padLeft(2, '0');
+    return '$m:$s';
   }
 
   void _toggleMute() {
@@ -344,6 +468,7 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   void _endCallLocal() {
+    _callTimer?.cancel(); // NEW: stop timer on call end
     _localStream?.getTracks().forEach((track) => track.stop());
     _localStream?.dispose();
     _peerConnection?.close();
@@ -359,9 +484,11 @@ class _CallScreenState extends State<CallScreen> {
 
   @override
   void dispose() {
+    _callTimer?.cancel(); // NEW: safety cancel
     widget.socket?.off('callAccepted');
     widget.socket?.off('callRejected');
     widget.socket?.off('callCancelled');
+    widget.socket?.off('callMissed'); // NEW
     widget.socket?.off('webrtcOffer');
     widget.socket?.off('webrtcAnswer');
     widget.socket?.off('webrtcIceCandidate');
@@ -410,8 +537,9 @@ class _CallScreenState extends State<CallScreen> {
                             ),
                           ),
                           const SizedBox(height: 8),
+                          // ---- UPDATED: show live duration once connected ----
                           Text(
-                            _callStatus,
+                            _isCallConnected ? _formatDuration(_callDurationSeconds) : _callStatus,
                             style: TextStyle(
                               fontSize: 16,
                               color: Colors.white.withValues(alpha: 0.7),

@@ -8,6 +8,7 @@ const messageRoutes = require("./messages");
 const cors = require("cors");
 
 const pool = require("./db");
+const { redis, isRedisEnabled } = require("./redisClient");
 const admin = require("firebase-admin");
 const path = require("path");
 const fs = require("fs");
@@ -189,8 +190,192 @@ io.use((socket, next) => {
 
 // Global active WebRTC calls registry
 const activeCalls = new Map(); // conversationId -> { callerId, recipientId, isVideoCall, status }
+// NEW: Global registry of pending ring-timeout timers -> conversationId -> Timeout handle
+const callRingTimeouts = new Map();
 // Global active user socket connections registry: userId -> Set<socketId>
 const userSockets = new Map();
+
+// NEW: How long (ms) an outgoing call rings before being auto-cancelled as "missed"
+const CALL_RING_TIMEOUT_MS = 45000;
+
+// ==================================================
+// REDIS-BACKED PRESENCE TRACKING (restart-safe online/offline)
+// ==================================================
+// Why: userSockets (above) is an in-memory Map that resets to empty on every
+// server restart/redeploy. If the process crashes or is redeployed while a
+// user is connected, the socket "disconnect" handler never runs, so Postgres
+// is left showing that user as permanently online ("ghost online").
+//
+// Fix: each connected user's presence is mirrored into Redis as a key with a
+// short TTL (PRESENCE_TTL_SECONDS). While connected, a heartbeat refreshes
+// that TTL periodically. Redis itself survives app restarts/redeploys (it's
+// a separate managed process), so a reconciliation job can compare "who
+// Postgres thinks is online" against "whose presence key is still alive in
+// Redis" and correct any stale rows automatically — even after a crash.
+const PRESENCE_TTL_SECONDS = 30; // presence key expires if not refreshed within this window
+const PRESENCE_HEARTBEAT_MS = 15000; // refresh well before the TTL expires
+const PRESENCE_RECONCILE_MS = 20000; // how often to sweep for stale "online" rows
+
+function presenceKey(userId) {
+  return `duochat:presence:${userId}`;
+}
+
+async function markUserPresentInRedis(userId) {
+  if (!isRedisEnabled()) return;
+  try {
+    await redis.set(presenceKey(userId), Date.now().toString(), "EX", PRESENCE_TTL_SECONDS);
+  } catch (err) {
+    console.error(`Redis presence SET error for user ${userId}:`, err.message);
+  }
+}
+
+async function clearUserPresenceInRedis(userId) {
+  if (!isRedisEnabled()) return;
+  try {
+    await redis.del(presenceKey(userId));
+  } catch (err) {
+    console.error(`Redis presence DEL error for user ${userId}:`, err.message);
+  }
+}
+
+async function isUserPresentInRedis(userId) {
+  if (!isRedisEnabled()) return null; // null = "unknown, Redis not available"
+  try {
+    const val = await redis.get(presenceKey(userId));
+    return val !== null;
+  } catch (err) {
+    console.error(`Redis presence GET error for user ${userId}:`, err.message);
+    return null;
+  }
+}
+
+// Reconciliation sweep: for our strict 2-user app (ids 1 and 2), if Postgres
+// says a user is online but their Redis presence key has expired/missing
+// (meaning no server process has heartbeated for them recently), correct
+// Postgres and notify the other user. This heals "ghost online" after a
+// crash or redeploy, without needing any manual intervention.
+async function reconcilePresenceWithRedis() {
+  if (!isRedisEnabled()) return; // nothing to reconcile without Redis
+  try {
+    const dbRes = await pool.query("SELECT id, is_online FROM users WHERE id IN (1, 2)");
+    for (const row of dbRes.rows) {
+      if (!row.is_online) continue;
+      const stillPresent = await isUserPresentInRedis(row.id);
+      // Also trust a live in-memory socket (covers the case where Redis
+      // itself briefly hiccups but the socket is genuinely still connected).
+      const hasLiveSocket = userSockets.has(Number(row.id)) && userSockets.get(Number(row.id)).size > 0;
+
+      if (stillPresent === false && !hasLiveSocket) {
+        const lastSeenAt = new Date().toISOString();
+        await pool.query("UPDATE users SET is_online = false, last_seen_at = NOW() WHERE id = $1", [row.id]);
+        const recipientId = Number(row.id) === 1 ? 2 : 1;
+        io.to(`user_${recipientId}`).emit("userOffline", {
+          conversationId: 1,
+          userId: Number(row.id),
+          lastSeenAt,
+        });
+        console.log(`[PRESENCE RECONCILE] Corrected stale ONLINE status for User ${row.id} → OFFLINE 🩹`);
+      }
+    }
+  } catch (err) {
+    console.error("Presence reconciliation error:", err.message);
+  }
+}
+
+// NEW: Helper to clear any pending ring-timeout for a conversation
+function clearCallRingTimeout(conversationId) {
+  const key = String(conversationId);
+  const existing = callRingTimeouts.get(key);
+  if (existing) {
+    clearTimeout(existing);
+    callRingTimeouts.delete(key);
+  }
+}
+
+// ==================================================
+// DISAPPEARING MESSAGES — background sweep for expired messages
+// ==================================================
+const DISAPPEARING_SWEEP_MS = 30000; // check every 30 seconds
+
+async function sweepExpiredMessages() {
+  // --- Live location shares that have run past their end time ---
+  try {
+    const liveRes = await pool.query(
+      `UPDATE messages
+       SET live_location_active = false
+       WHERE live_location_active = true AND live_location_expires_at IS NOT NULL AND live_location_expires_at <= NOW()
+       RETURNING id, conversation_id`
+    );
+    for (const row of liveRes.rows) {
+      io.to(String(row.conversation_id)).emit("liveLocationEnded", {
+        conversationId: Number(row.conversation_id),
+        messageId: Number(row.id),
+      });
+    }
+    if (liveRes.rowCount > 0) {
+      console.log(`[LIVE LOCATION SWEEP] Ended ${liveRes.rowCount} expired live share(s) 📍⏱️`);
+    }
+  } catch (err) {
+    console.error("Live-location sweep error:", err.message);
+  }
+
+  // --- Disappearing messages ---
+  try {
+    const result = await pool.query(
+      `UPDATE messages
+       SET is_deleted = true, message = 'This message was deleted'
+       WHERE expires_at IS NOT NULL AND expires_at <= NOW() AND is_deleted = false
+       RETURNING id, conversation_id, sender_id`
+    );
+
+    if (result.rowCount > 0) {
+      for (const row of result.rows) {
+        const room = String(row.conversation_id);
+        io.to(room).emit("messageDeleted", {
+          conversationId: row.conversation_id,
+          messageId: Number(row.id),
+          senderId: row.sender_id,
+          isDeleted: true,
+          reason: "expired",
+        });
+      }
+      console.log(`[DISAPPEARING SWEEP] Auto-deleted ${result.rowCount} expired message(s) ⏳🗑️`);
+    }
+  } catch (err) {
+    console.error("Disappearing-messages sweep error:", err.message);
+  }
+}
+
+// ==================================================
+// LIVE LOCATION — background sweep to auto-end expired live shares
+// ==================================================
+const LIVE_LOCATION_SWEEP_MS = 30000; // check every 30 seconds
+
+async function sweepExpiredLiveLocations() {
+  try {
+    const result = await pool.query(
+      `UPDATE messages
+       SET live_location_active = false
+       WHERE live_location_active = true
+         AND live_location_expires_at IS NOT NULL
+         AND live_location_expires_at <= NOW()
+       RETURNING id, conversation_id`
+    );
+
+    if (result.rowCount > 0) {
+      for (const row of result.rows) {
+        const room = String(row.conversation_id);
+        io.to(room).emit("liveLocationEnded", {
+          conversationId: row.conversation_id,
+          messageId: Number(row.id),
+        });
+      }
+      console.log(`[LIVE LOCATION SWEEP] Auto-ended ${result.rowCount} expired live location share(s) 📍⏳`);
+    }
+  } catch (err) {
+    console.error("Live-location sweep error:", err.message);
+  }
+}
 
 // Socket.IO Connection Handler
 io.on("connection", (socket) => {
@@ -210,12 +395,20 @@ io.on("connection", (socket) => {
 
     if (socketSet.size === 1) {
       pool.query("UPDATE users SET is_online = true WHERE id = $1", [numId]).catch(() => {});
+      markUserPresentInRedis(numId); // NEW: mirror presence into Redis
       const recipientId = numId === 1 ? 2 : 1;
       io.to(`user_${recipientId}`).emit("userOnline", { userId: numId, conversationId: 1 });
       console.log(`User ${numId} is now ONLINE (1st socket: ${socket.id}) 🟢`);
     } else {
       console.log(`User ${numId} connected additional socket (${socket.id}, active sockets: ${socketSet.size})`);
     }
+
+    // NEW: Heartbeat — refresh this user's Redis presence TTL periodically
+    // while at least one of their sockets is connected. One interval per
+    // socket is fine (cheap SET EX); it self-clears on this socket's disconnect.
+    socket.data.presenceHeartbeat = setInterval(() => {
+      markUserPresentInRedis(numId);
+    }, PRESENCE_HEARTBEAT_MS);
   }
 
   // Join User Room
@@ -241,6 +434,17 @@ io.on("connection", (socket) => {
     const room = String(conversationId);
     socket.join(room);
     console.log(`[SERVER SOCKET] JOIN ROOM: ${room} by socketId=${socket.id} (UserId: ${userId})`);
+
+    // NEW: sync this socket with the conversation's current disappearing-timer setting
+    pool.query("SELECT disappearing_timer_seconds FROM conversations WHERE id = $1", [conversationId])
+      .then((convRes) => {
+        socket.emit("disappearingTimerUpdate", {
+          conversationId: Number(conversationId),
+          timerSeconds: convRes.rows[0]?.disappearing_timer_seconds || null,
+          setBy: null,
+        });
+      })
+      .catch((err) => console.error("Error syncing disappearing timer on join:", err.message));
 
     if (userId) {
       const userRoom = `user_${userId}`;
@@ -299,7 +503,7 @@ io.on("connection", (socket) => {
       if (messageId || isAlreadySaved) {
         // Message was already saved to DB by /messages/upload endpoint!
         const existingRes = await pool.query(
-          `SELECT id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, is_edited, is_deleted, reactions, created_at
+          `SELECT id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, is_edited, is_deleted, reactions, expires_at, created_at
            FROM messages WHERE id = $1`,
           [messageId]
         );
@@ -309,12 +513,27 @@ io.on("connection", (socket) => {
       }
 
       if (!newMessage) {
+        // NEW: Disappearing Messages — inherit the conversation's active timer, if any
+        let expiresAt = null;
+        try {
+          const convRes = await pool.query(
+            "SELECT disappearing_timer_seconds FROM conversations WHERE id = $1",
+            [conversationId]
+          );
+          const timerSeconds = convRes.rows[0]?.disappearing_timer_seconds;
+          if (timerSeconds && Number(timerSeconds) > 0) {
+            expiresAt = new Date(Date.now() + Number(timerSeconds) * 1000);
+          }
+        } catch (timerErr) {
+          console.error("Error resolving disappearing timer:", timerErr.message);
+        }
+
         // Save to PostgreSQL database
         const result = await pool.query(
-          `INSERT INTO messages (conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, false)
-           RETURNING id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, is_edited, is_deleted, reactions, created_at`,
-          [conversationId, senderId, message || "", attachmentUrl || null, attachmentType || null, attachmentName || null, attachmentSize || null, replyToMessageId || null, nonce || null, isEncrypted !== undefined ? isEncrypted : true]
+          `INSERT INTO messages (conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, false, $11)
+           RETURNING id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, is_edited, is_deleted, reactions, expires_at, created_at`,
+          [conversationId, senderId, message || "", attachmentUrl || null, attachmentType || null, attachmentName || null, attachmentSize || null, replyToMessageId || null, nonce || null, isEncrypted !== undefined ? isEncrypted : true, expiresAt]
         );
 
         newMessage = result.rows[0];
@@ -582,6 +801,199 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ==================================================
+  // PINNED MESSAGES — only one pinned message per conversation at a time
+  // ==================================================
+  socket.on("pinMessage", async (data) => {
+    try {
+      const { conversationId, messageId } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !messageId || !userId) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, userId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      const checkMsg = await pool.query(
+        "SELECT id, is_deleted FROM messages WHERE id = $1 AND conversation_id = $2",
+        [messageId, conversationId]
+      );
+      if (checkMsg.rows.length === 0 || checkMsg.rows[0].is_deleted) return;
+
+      // Unpin any previously pinned message in this conversation first (single-pin model)
+      await pool.query(
+        "UPDATE messages SET is_pinned = false, pinned_by = NULL, pinned_at = NULL WHERE conversation_id = $1 AND is_pinned = true",
+        [conversationId]
+      );
+
+      const result = await pool.query(
+        `UPDATE messages
+         SET is_pinned = true, pinned_by = $1, pinned_at = NOW()
+         WHERE id = $2
+         RETURNING id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, is_pinned, pinned_by, pinned_at`,
+        [userId, messageId]
+      );
+
+      if (result.rowCount > 0) {
+        const room = String(conversationId);
+        io.to(room).emit("messagePinned", {
+          conversationId: Number(conversationId),
+          message: result.rows[0],
+        });
+        console.log(`Message ${messageId} pinned in conversation ${conversationId} by User ${userId} 📌`);
+      }
+    } catch (err) {
+      console.error("Error in pinMessage socket event:", err.message);
+    }
+  });
+
+  socket.on("unpinMessage", async (data) => {
+    try {
+      const { conversationId, messageId } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !userId) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, userId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      await pool.query(
+        "UPDATE messages SET is_pinned = false, pinned_by = NULL, pinned_at = NULL WHERE conversation_id = $1 AND is_pinned = true",
+        [conversationId]
+      );
+
+      const room = String(conversationId);
+      io.to(room).emit("messageUnpinned", {
+        conversationId: Number(conversationId),
+        messageId: messageId ? Number(messageId) : null,
+      });
+      console.log(`Pinned message cleared in conversation ${conversationId} by User ${userId} 📌`);
+    } catch (err) {
+      console.error("Error in unpinMessage socket event:", err.message);
+    }
+  });
+
+  // ==================================================
+  // LIVE LOCATION SHARING
+  // ==================================================
+  socket.on("shareLiveLocation", async (data) => {
+    try {
+      const { conversationId, latitude, longitude, durationSeconds } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId || latitude == null || longitude == null) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, senderId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      const isLive = durationSeconds && Number(durationSeconds) > 0;
+      const liveExpiresAt = isLive ? new Date(Date.now() + Number(durationSeconds) * 1000) : null;
+      const payload = JSON.stringify({ lat: Number(latitude), lng: Number(longitude), isLive: !!isLive });
+
+      const result = await pool.query(
+        `INSERT INTO messages (conversation_id, sender_id, message, attachment_type, is_delivered, is_read, live_location_active, live_location_expires_at)
+         VALUES ($1, $2, $3, 'location', false, false, $4, $5)
+         RETURNING id, conversation_id, sender_id, message, attachment_type, is_delivered, is_read, is_edited, is_deleted, live_location_active, live_location_expires_at, created_at`,
+        [conversationId, senderId, payload, !!isLive, liveExpiresAt]
+      );
+
+      const newMessage = result.rows[0];
+      const room = String(conversationId);
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+
+      socket.emit("newMessage", { ...newMessage, is_mine: true });
+      io.to(`user_${recipientId}`).emit("newMessage", { ...newMessage, is_mine: false });
+
+      console.log(`User ${senderId} shared ${isLive ? "LIVE" : "current"} location in conversation ${conversationId} 📍`);
+
+      if (!isLive) return; // one-time location share — nothing further to track
+
+      // Notify recipient with a push if they're not actively in the room
+      const roomSockets = io.sockets.adapter.rooms.get(room);
+      let isRecipientActiveInRoom = false;
+      if (roomSockets) {
+        for (const socketId of roomSockets) {
+          const s = io.sockets.sockets.get(socketId);
+          if (s && s.data && s.data.userId && Number(s.data.userId) === Number(recipientId)) {
+            isRecipientActiveInRoom = true;
+            break;
+          }
+        }
+      }
+      if (!isRecipientActiveInRoom) {
+        await sendPushNotification({
+          recipientId,
+          title: "Clock",
+          body: "Started sharing live location",
+          dataPayload: { conversationId: String(conversationId), type: "live_location" },
+        });
+      }
+    } catch (err) {
+      console.error("Error in shareLiveLocation socket event:", err.message);
+    }
+  });
+
+  socket.on("updateLiveLocation", async (data) => {
+    try {
+      const { conversationId, messageId, latitude, longitude } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !messageId || !senderId || latitude == null || longitude == null) return;
+
+      const checkMsg = await pool.query(
+        "SELECT sender_id, live_location_active FROM messages WHERE id = $1",
+        [messageId]
+      );
+      if (checkMsg.rows.length === 0) return;
+      if (String(checkMsg.rows[0].sender_id) !== String(senderId)) return;
+      if (!checkMsg.rows[0].live_location_active) return; // sharing already ended/expired
+
+      const payload = JSON.stringify({ lat: Number(latitude), lng: Number(longitude), isLive: true });
+      await pool.query("UPDATE messages SET message = $1 WHERE id = $2", [payload, messageId]);
+
+      const room = String(conversationId);
+      io.to(room).emit("liveLocationUpdate", {
+        conversationId: Number(conversationId),
+        messageId: Number(messageId),
+        latitude: Number(latitude),
+        longitude: Number(longitude),
+      });
+    } catch (err) {
+      console.error("Error in updateLiveLocation socket event:", err.message);
+    }
+  });
+
+  socket.on("stopLiveLocation", async (data) => {
+    try {
+      const { conversationId, messageId } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !messageId || !senderId) return;
+
+      const result = await pool.query(
+        `UPDATE messages SET live_location_active = false
+         WHERE id = $1 AND sender_id = $2
+         RETURNING id`,
+        [messageId, senderId]
+      );
+
+      if (result.rowCount > 0) {
+        const room = String(conversationId);
+        io.to(room).emit("liveLocationEnded", {
+          conversationId: Number(conversationId),
+          messageId: Number(messageId),
+        });
+        console.log(`Live location sharing ended for message ${messageId} in conversation ${conversationId} 📍🛑`);
+      }
+    } catch (err) {
+      console.error("Error in stopLiveLocation socket event:", err.message);
+    }
+  });
+
   // React to Message Event
   socket.on("reactToMessage", async (data) => {
     try {
@@ -669,6 +1081,59 @@ io.on("connection", (socket) => {
   });
 
   // ==================================================
+  // DISAPPEARING MESSAGES — set / broadcast the per-conversation timer
+  // ==================================================
+  socket.on("setDisappearingTimer", async (data) => {
+    try {
+      const { conversationId, timerSeconds } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, senderId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      // 0 or null/undefined means "Off"
+      const normalizedSeconds = timerSeconds && Number(timerSeconds) > 0 ? Number(timerSeconds) : null;
+
+      await pool.query(
+        "UPDATE conversations SET disappearing_timer_seconds = $1 WHERE id = $2",
+        [normalizedSeconds, conversationId]
+      );
+
+      const room = String(conversationId);
+      io.to(room).emit("disappearingTimerUpdate", {
+        conversationId: Number(conversationId),
+        timerSeconds: normalizedSeconds,
+        setBy: Number(senderId),
+      });
+      console.log(`Disappearing timer for conversation ${conversationId} set to ${normalizedSeconds ?? "Off"} by User ${senderId} ⏳`);
+    } catch (err) {
+      console.error("Error in setDisappearingTimer socket event:", err.message);
+    }
+  });
+
+  socket.on("getDisappearingTimer", async (data) => {
+    try {
+      const { conversationId } = data || {};
+      if (!conversationId) return;
+      const result = await pool.query(
+        "SELECT disappearing_timer_seconds FROM conversations WHERE id = $1",
+        [conversationId]
+      );
+      socket.emit("disappearingTimerUpdate", {
+        conversationId: Number(conversationId),
+        timerSeconds: result.rows[0]?.disappearing_timer_seconds || null,
+        setBy: null,
+      });
+    } catch (err) {
+      console.error("Error in getDisappearingTimer socket event:", err.message);
+    }
+  });
+
+  // ==================================================
   // PHASE 4: WEBRTC 1-TO-1 CALL SIGNALING HANDLERS
   // ==================================================
 
@@ -736,6 +1201,43 @@ io.on("connection", (socket) => {
           },
         });
       }
+
+      // ==================================================
+      // NEW: Auto-cancel ("missed call") if not answered within CALL_RING_TIMEOUT_MS
+      // ==================================================
+      clearCallRingTimeout(conversationId); // safety: clear any stale timer first
+      const timeoutId = setTimeout(async () => {
+        const stillRinging = activeCalls.get(String(conversationId));
+        if (stillRinging && stillRinging.status === "calling") {
+          activeCalls.delete(String(conversationId));
+          callRingTimeouts.delete(String(conversationId));
+
+          io.to(`user_${callerId}`).emit("callMissed", {
+            conversationId: Number(conversationId),
+          });
+          io.to(`user_${recipientId}`).emit("callCancelled", {
+            conversationId: Number(conversationId),
+            reason: "timeout",
+          });
+
+          try {
+            await sendPushNotification({
+              recipientId: callerId,
+              title: "Clock",
+              body: "Missed Call",
+              dataPayload: {
+                conversationId: String(conversationId),
+                type: "missed_call",
+              },
+            });
+          } catch (pushErr) {
+            console.error("Error sending missed-call push notification:", pushErr.message);
+          }
+
+          console.log(`Call in conversation ${conversationId} auto-cancelled (no answer within ${CALL_RING_TIMEOUT_MS / 1000}s) ⏱️`);
+        }
+      }, CALL_RING_TIMEOUT_MS);
+      callRingTimeouts.set(String(conversationId), timeoutId);
     } catch (err) {
       console.error("Error in callUser socket event:", err.message);
     }
@@ -746,6 +1248,9 @@ io.on("connection", (socket) => {
       const { conversationId } = data || {};
       const userId = socket.user?.userId || socket.data?.userId;
       if (!conversationId || !userId) return;
+
+      // NEW: call was answered — cancel the pending ring-timeout
+      clearCallRingTimeout(conversationId);
 
       const call = activeCalls.get(String(conversationId));
       if (call) {
@@ -765,6 +1270,10 @@ io.on("connection", (socket) => {
     try {
       const { conversationId, reason } = data || {};
       const userId = socket.user?.userId || socket.data?.userId;
+
+      // NEW: call was explicitly rejected — cancel the pending ring-timeout
+      clearCallRingTimeout(conversationId);
+
       const call = activeCalls.get(String(conversationId));
       if (call) {
         console.log(`Call rejected by User ${userId} in conversation ${conversationId} ❌`);
@@ -784,6 +1293,10 @@ io.on("connection", (socket) => {
     try {
       const { conversationId } = data || {};
       const userId = socket.user?.userId || socket.data?.userId;
+
+      // NEW: caller cancelled before answer — cancel the pending ring-timeout
+      clearCallRingTimeout(conversationId);
+
       const call = activeCalls.get(String(conversationId));
       if (call && Number(call.callerId) === Number(userId)) {
         console.log(`Call cancelled by caller User ${userId} in conversation ${conversationId} 🚫`);
@@ -873,6 +1386,9 @@ io.on("connection", (socket) => {
       const senderId = socket.user?.userId || socket.data?.userId;
       if (!conversationId) return;
 
+      // NEW: call ended — cancel any pending ring-timeout
+      clearCallRingTimeout(conversationId);
+
       activeCalls.delete(String(conversationId));
       const recipientId = Number(senderId) === 1 ? 2 : 1;
       io.to(`user_${recipientId}`).to(String(conversationId)).emit("callEnded", {
@@ -889,6 +1405,12 @@ io.on("connection", (socket) => {
     console.log(`Socket disconnected: ${socket.id}`);
     const userId = socket.user?.userId || socket.user?.id || socket.data?.userId;
 
+    // NEW: stop this socket's presence heartbeat
+    if (socket.data.presenceHeartbeat) {
+      clearInterval(socket.data.presenceHeartbeat);
+      socket.data.presenceHeartbeat = null;
+    }
+
     if (userId && userSockets.has(Number(userId))) {
       const socketSet = userSockets.get(Number(userId));
       socketSet.delete(socket.id);
@@ -896,6 +1418,8 @@ io.on("connection", (socket) => {
       if (socketSet.size === 0) {
         userSockets.delete(Number(userId));
         const lastSeenAt = new Date().toISOString();
+
+        await clearUserPresenceInRedis(userId); // NEW: drop Redis presence key immediately
 
         try {
           await pool.query("UPDATE users SET is_online = false, last_seen_at = NOW() WHERE id = $1", [userId]);
@@ -982,4 +1506,20 @@ server.listen(PORT, () => {
   enforcePrivateTwoUserApp().catch(err => {
     console.error("[DB SEED] Unhandled seed error:", err.message);
   });
+
+  // NEW: Presence reconciliation — heals "ghost online" rows left behind by
+  // a crash or redeploy (Postgres says online, but no live socket or Redis
+  // heartbeat backs that up). No-op automatically if REDIS_URL isn't set.
+  setInterval(reconcilePresenceWithRedis, PRESENCE_RECONCILE_MS);
+  // Also run one pass shortly after boot, so a stale "online" row left by a
+  // crash gets corrected quickly instead of waiting a full interval.
+  setTimeout(reconcilePresenceWithRedis, 5000);
+
+  // NEW: Disappearing messages — periodic sweep to auto-delete expired messages
+  setInterval(sweepExpiredMessages, DISAPPEARING_SWEEP_MS);
+  setTimeout(sweepExpiredMessages, 5000);
+
+  // NEW: Live location — periodic sweep to auto-end expired live shares
+  setInterval(sweepExpiredLiveLocations, LIVE_LOCATION_SWEEP_MS);
+  setTimeout(sweepExpiredLiveLocations, 5000);
 });

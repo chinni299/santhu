@@ -475,4 +475,73 @@ class AuthService {
       debugPrint("Error updating user profile: $e");
     }
   }
+
+  // ==================================================
+  // NEW: JWT EXPIRY CHECK (no external package needed)
+  // ==================================================
+
+  // Decode a JWT payload and check whether it has expired.
+  // Returns true (treated as expired) if the token is malformed or has no exp claim we can trust.
+  static bool isTokenExpired(String token) {
+    try {
+      final parts = token.split('.');
+      if (parts.length != 3) return true;
+
+      String normalized = parts[1].replaceAll('-', '+').replaceAll('_', '/');
+      switch (normalized.length % 4) {
+        case 2:
+          normalized += '==';
+          break;
+        case 3:
+          normalized += '=';
+          break;
+      }
+
+      final payloadJson = utf8.decode(base64Url.decode(normalized));
+      final payload = jsonDecode(payloadJson) as Map<String, dynamic>;
+
+      final exp = payload['exp'];
+      if (exp == null) return false; // no expiry claim present — treat as non-expiring
+
+      final expiryDate = DateTime.fromMillisecondsSinceEpoch((exp as int) * 1000);
+      return DateTime.now().isAfter(expiryDate);
+    } catch (e) {
+      debugPrint("Error decoding JWT for expiry check: $e");
+      return true;
+    }
+  }
+
+  // Check if the stored session for a specific userId is still valid (token exists and isn't expired).
+  static Future<bool> isSessionValid(int userId) async {
+    final token = await getTokenForUser(userId);
+    if (token == null || token.isEmpty) return false;
+    return !isTokenExpired(token);
+  }
+
+  // Returns remaining seconds until the given user's token expires, or null if unknown/expired/missing.
+  static Future<int?> secondsUntilExpiry(int userId) async {
+    final token = await getTokenForUser(userId);
+    if (token == null || token.isEmpty) return null;
+    try {
+      final parts = token.split('.');
+      if (parts.length != 3) return null;
+      String normalized = parts[1].replaceAll('-', '+').replaceAll('_', '/');
+      switch (normalized.length % 4) {
+        case 2:
+          normalized += '==';
+          break;
+        case 3:
+          normalized += '=';
+          break;
+      }
+      final payload = jsonDecode(utf8.decode(base64Url.decode(normalized))) as Map<String, dynamic>;
+      final exp = payload['exp'];
+      if (exp == null) return null;
+      final expiryDate = DateTime.fromMillisecondsSinceEpoch((exp as int) * 1000);
+      final remaining = expiryDate.difference(DateTime.now()).inSeconds;
+      return remaining > 0 ? remaining : 0;
+    } catch (_) {
+      return null;
+    }
+  }
 }
