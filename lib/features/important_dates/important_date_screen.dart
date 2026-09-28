@@ -141,7 +141,7 @@ class _ImportantDateScreenState extends State<ImportantDateScreen> {
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       child: ListTile(
                         leading: CircleAvatar(
-                          backgroundColor: AppTheme.primaryTeal.withOpacity(0.2),
+                          backgroundColor: AppTheme.primaryTeal.withValues(alpha: 0.2),
                           child: Icon(_iconForType(d.dateType), color: AppTheme.primaryTeal),
                         ),
                         title: Text(d.title, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),

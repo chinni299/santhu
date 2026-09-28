@@ -114,7 +114,7 @@ class _AddMemoryScreenState extends State<AddMemoryScreen> {
               decoration: BoxDecoration(
                 color: const Color(0xFF1E293B),
                 borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.grey.withOpacity(0.3)),
+                border: Border.all(color: Colors.grey.withValues(alpha: 0.3)),
               ),
               child: _selectedFile != null
                   ? ClipRRect(

@@ -75,7 +75,7 @@ class _ChatThemeSettingsScreenState extends State<ChatThemeSettingsScreen> {
                 ...ChatThemeMode.values.map((mode) {
                   final isSelected = _selectedMode == mode;
                   return Card(
-                    color: isSelected ? AppTheme.primaryTeal.withOpacity(0.25) : const Color(0xFF1E293B),
+                    color: isSelected ? AppTheme.primaryTeal.withValues(alpha: 0.25) : const Color(0xFF1E293B),
                     margin: const EdgeInsets.only(bottom: 12),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),

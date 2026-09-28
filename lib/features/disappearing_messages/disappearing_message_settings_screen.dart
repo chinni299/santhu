@@ -68,9 +68,11 @@ class _DisappearingMessageSettingsScreenState extends State<DisappearingMessageS
           ...DisappearingDuration.values.map((d) {
             return RadioListTile<DisappearingDuration>(
               value: d,
+              // ignore: deprecated_member_use
               groupValue: _selected,
               title: Text(d.label, style: const TextStyle(fontWeight: FontWeight.w700)),
               activeColor: AppTheme.primaryTeal,
+              // ignore: deprecated_member_use
               onChanged: (val) {
                 if (val != null) _onSelect(val);
               },

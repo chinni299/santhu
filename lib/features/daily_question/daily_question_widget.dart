@@ -26,7 +26,7 @@ class DailyQuestionWidget extends StatelessWidget {
         decoration: BoxDecoration(
           color: const Color(0xFF1E293B),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppTheme.primaryTeal.withOpacity(0.3)),
+          border: Border.all(color: AppTheme.primaryTeal.withValues(alpha: 0.3)),
         ),
         child: Row(
           children: [

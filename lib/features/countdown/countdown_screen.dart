@@ -85,7 +85,7 @@ class _CountdownScreenState extends State<CountdownScreen> {
                   ..._dates.map((d) {
                     final isSelected = _selectedTarget?.id == d.id;
                     return Card(
-                      color: isSelected ? AppTheme.primaryTeal.withOpacity(0.25) : const Color(0xFF1E293B),
+                      color: isSelected ? AppTheme.primaryTeal.withValues(alpha: 0.25) : const Color(0xFF1E293B),
                       margin: const EdgeInsets.only(bottom: 8),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),

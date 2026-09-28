@@ -112,7 +112,7 @@ class _AddEditDateScreenState extends State<AddEditDateScreen> {
               ),
               const SizedBox(height: 16),
               DropdownButtonFormField<String>(
-                value: _dateType,
+                initialValue: _dateType,
                 dropdownColor: const Color(0xFF1E293B),
                 style: const TextStyle(color: Colors.white),
                 decoration: const InputDecoration(

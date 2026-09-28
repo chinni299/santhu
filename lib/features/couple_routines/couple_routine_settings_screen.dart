@@ -135,7 +135,7 @@ class _CoupleRoutineSettingsScreenState extends State<CoupleRoutineSettingsScree
                           title: const Text('Good Morning Routine 🌅', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
                           subtitle: const Text('Automatically remind / send morning message', style: TextStyle(fontSize: 12, color: Colors.grey)),
                           value: _morningEnabled,
-                          activeColor: AppTheme.primaryTeal,
+                          activeTrackColor: AppTheme.primaryTeal,
                           onChanged: (val) => setState(() => _morningEnabled = val),
                         ),
                         if (_morningEnabled) ...[
@@ -178,7 +178,7 @@ class _CoupleRoutineSettingsScreenState extends State<CoupleRoutineSettingsScree
                           title: const Text('Good Night Routine 🌙', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
                           subtitle: const Text('Automatically remind / send night message', style: TextStyle(fontSize: 12, color: Colors.grey)),
                           value: _nightEnabled,
-                          activeColor: AppTheme.primaryTeal,
+                          activeTrackColor: AppTheme.primaryTeal,
                           onChanged: (val) => setState(() => _nightEnabled = val),
                         ),
                         if (_nightEnabled) ...[
@@ -212,7 +212,7 @@ class _CoupleRoutineSettingsScreenState extends State<CoupleRoutineSettingsScree
                   title: const Text('Notification Sound', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
                   subtitle: const Text('Play sound with routine notifications', style: TextStyle(fontSize: 12, color: Colors.grey)),
                   value: _soundEnabled,
-                  activeColor: AppTheme.primaryTeal,
+                  activeTrackColor: AppTheme.primaryTeal,
                   onChanged: (val) => setState(() => _soundEnabled = val),
                 ),
                 const SizedBox(height: 24),

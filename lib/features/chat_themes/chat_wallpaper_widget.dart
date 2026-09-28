@@ -27,7 +27,7 @@ class ChatWallpaperWidget extends StatelessWidget {
           ),
         ),
         child: Container(
-          color: Colors.black.withOpacity(0.3), // subtle dark overlay for message legibility
+          color: Colors.black.withValues(alpha: 0.3), // subtle dark overlay for message legibility
           child: child,
         ),
       );

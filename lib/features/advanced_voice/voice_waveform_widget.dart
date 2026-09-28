@@ -60,7 +60,7 @@ class _WaveformPainter extends CustomPainter {
       ..strokeWidth = barWidth;
 
     final paintInactive = Paint()
-      ..color = inactiveColor.withOpacity(0.4)
+      ..color = inactiveColor.withValues(alpha: 0.4)
       ..strokeCap = StrokeCap.round
       ..strokeWidth = barWidth;
 

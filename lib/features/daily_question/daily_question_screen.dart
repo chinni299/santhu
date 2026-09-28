@@ -85,7 +85,7 @@ class _DailyQuestionScreenState extends State<DailyQuestionScreen> {
                         decoration: BoxDecoration(
                           color: const Color(0xFF1E293B),
                           borderRadius: BorderRadius.circular(16),
-                          border: Border.all(color: AppTheme.primaryTeal.withOpacity(0.4)),
+                          border: Border.all(color: AppTheme.primaryTeal.withValues(alpha: 0.4)),
                         ),
                         child: Column(
                           children: [
