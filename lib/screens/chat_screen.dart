@@ -3935,7 +3935,7 @@ class _ChatScreenState extends State<ChatScreen> {
       });
       _scrollToBottom();
 
-      debugPrint('[CHAT SOCKET] SEND ENCRYPTED MESSAGE (nonce: ${encResult['nonce']})');
+      debugPrint('[CHAT SOCKET] SEND ENCRYPTED MESSAGE (E2EE enabled)');
       socket?.emit('sendMessage', {
         'conversationId': widget.conversationId,
         'senderId': widget.currentUserId,

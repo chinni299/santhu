@@ -17,10 +17,10 @@ const FormData = require("form-data");
 const { URL } = require("url");
 
 const SERVER_URL = process.env.TEST_SERVER_URL || "http://localhost:5000";
-const USER1_EMAIL = process.env.USER1_EMAIL || "user1@test.com";
-const USER2_EMAIL = process.env.USER2_EMAIL || "user2@test.com";
-const USER1_PASSWORD = process.env.USER1_PASSWORD || "password1";
-const USER2_PASSWORD = process.env.USER2_PASSWORD || "password2";
+const USER1_EMAIL = process.env.DUO_USER1_EMAIL || "pottoda65@gmail.com";
+const USER2_EMAIL = process.env.DUO_USER2_EMAIL || "pottiamma45@gmail.com";
+const USER1_PASSWORD = process.env.DUO_USER1_PASSWORD || "Pottoda@9492982325";
+const USER2_PASSWORD = process.env.DUO_USER2_PASSWORD || "Pottiamma@9505954559";
 const CONVERSATION_ID = 1;
 
 let passed = 0;
