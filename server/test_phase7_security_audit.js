@@ -1,3 +1,4 @@
+require('dotenv').config();
 const io = require('socket.io-client');
 const http = require('http');
 
@@ -43,12 +44,12 @@ async function runSecurityAuditTests() {
     const res1 = await request('/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: { email: 'user1@example.com', password: 'password123' },
+      body: { email: process.env.DUO_USER1_EMAIL || 'pottoda65@gmail.com', password: process.env.DUO_USER1_PASSWORD || 'Pottoda@9492982325' },
     });
     const res2 = await request('/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: { email: 'user2@example.com', password: 'password123' },
+      body: { email: process.env.DUO_USER2_EMAIL || 'pottiamma45@gmail.com', password: process.env.DUO_USER2_PASSWORD || 'Pottiamma@9505954559' },
     });
 
     const token1 = res1.body.token;

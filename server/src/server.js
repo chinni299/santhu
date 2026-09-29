@@ -1136,6 +1136,12 @@ io.on("connection", (socket) => {
     socket.broadcast.emit("routineUpdated", data);
   });
 
+  socket.on("sharedMomentChanged", (data) => {
+    const senderId = socket.user?.userId || socket.data?.userId;
+    if (!senderId) return;
+    socket.broadcast.emit("sharedMomentChanged", data);
+  });
+
   // React to Message Event
   socket.on("reactToMessage", async (data) => {
     try {

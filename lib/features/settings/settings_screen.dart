@@ -10,6 +10,7 @@ import '../daily_question/daily_question_screen.dart';
 import '../private_memories/memory_timeline_screen.dart';
 import '../shared_notes/shared_notes_screen.dart';
 import '../couple_routines/couple_routine_settings_screen.dart';
+import '../shared_moments/shared_moment_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   final int currentUserId;
@@ -172,6 +173,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
             trailing: const Icon(Icons.chevron_right_rounded),
             onTap: () {
               Navigator.push(context, MaterialPageRoute(builder: (_) => const SharedNotesScreen()));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.location_on_outlined, color: AppTheme.primaryTeal),
+            title: const Text('Shared Moments', style: TextStyle(fontWeight: FontWeight.w700)),
+            subtitle: const Text('Save special moments with location & photos'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: () {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const SharedMomentScreen()));
             },
           ),
           ListTile(

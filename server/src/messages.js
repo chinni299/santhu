@@ -134,6 +134,18 @@ pool.query(`
     sound_enabled BOOLEAN DEFAULT true,
     updated_at TIMESTAMPTZ DEFAULT NOW()
   );
+  CREATE TABLE IF NOT EXISTS shared_moments (
+    id SERIAL PRIMARY KEY,
+    created_by INTEGER NOT NULL,
+    caption TEXT,
+    media_url TEXT,
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
+    location_enabled BOOLEAN DEFAULT false,
+    moment_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+  );
 `).then(() => {
   console.log("Couple-status & user-moods tables verified ✅");
 }).catch((err) => {
@@ -204,6 +216,58 @@ router.get("/test", (req, res) => {
     success: true,
     message: "Messages router is mounted correctly ✅",
   });
+});
+
+// SHARED MOMENTS
+router.get("/shared-moments", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT id, created_by, caption, media_url, latitude, longitude, location_enabled, moment_date, created_at, updated_at FROM shared_moments ORDER BY moment_date DESC"
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get shared moments error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to fetch shared moments" });
+  }
+});
+
+router.post("/shared-moments", upload.single("media"), async (req, res) => {
+  try {
+    const userId = req.user.id || req.user.userId;
+    const { caption, latitude, longitude, location_enabled, moment_date } = req.body;
+
+    let mediaUrl = req.body.media_url || null;
+    if (req.file) {
+      mediaUrl = `/messages/media/${req.file.filename}`;
+    }
+
+    const locEnabled = location_enabled === true || location_enabled === 'true';
+    const lat = locEnabled && latitude ? parseFloat(latitude) : null;
+    const lng = locEnabled && longitude ? parseFloat(longitude) : null;
+
+    const result = await pool.query(
+      `INSERT INTO shared_moments (created_by, caption, media_url, latitude, longitude, location_enabled, moment_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, created_by, caption, media_url, latitude, longitude, location_enabled, moment_date, created_at, updated_at`,
+      [userId, caption || null, mediaUrl, lat, lng, locEnabled, moment_date || new Date()]
+    );
+
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    console.error("Create shared moment error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to create shared moment" });
+  }
+});
+
+router.delete("/shared-moments/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query("DELETE FROM shared_moments WHERE id = $1", [id]);
+    res.json({ success: true, message: "Shared moment deleted successfully" });
+  } catch (error) {
+    console.error("Delete shared moment error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to delete shared moment" });
+  }
 });
 
 // GET SECURE PRIVATE ATTACHMENT BY MESSAGE ID

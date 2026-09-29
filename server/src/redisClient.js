@@ -8,12 +8,17 @@
 // Free Redis hosting options: Upstash (free tier), Render's own Redis addon,
 // or a local `redis-server` during development.
 
-const Redis = require("ioredis");
+let Redis = null;
+try {
+  Redis = require("ioredis");
+} catch (e) {
+  // ioredis not installed
+}
 
 let redis = null;
 let isReady = false;
 
-if (process.env.REDIS_URL) {
+if (process.env.REDIS_URL && Redis) {
   try {
     redis = new Redis(process.env.REDIS_URL, {
       maxRetriesPerRequest: 2,

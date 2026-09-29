@@ -237,10 +237,10 @@ class AuthService {
   }
 
   // Register local X25519 Public Key with backend
-  static Future<void> registerPublicKey() async {
+  static Future<void> registerPublicKey([int? userId]) async {
     try {
       final publicKeyB64 = await EncryptionService().getPublicKey();
-      final headers = await getAuthHeaders();
+      final headers = userId != null ? await getAuthHeadersForUser(userId) : await getAuthHeaders();
       final url = Uri.parse('${ApiConfig.baseUrl}/auth/public-key');
       await http.post(
         url,
@@ -269,6 +269,10 @@ class AuthService {
       debugPrint("Error fetching public key for user $userId: $e");
     }
     return null;
+  }
+
+  static Future<String?> getPeerPublicKey(int userId) async {
+    return await fetchPublicKey(userId);
   }
 
   // Persistent Contact Alias Storage (Per-Contact Custom Names)

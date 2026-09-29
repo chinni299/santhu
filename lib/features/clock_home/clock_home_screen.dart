@@ -9,6 +9,7 @@ class ClockHomeScreen extends StatefulWidget {
   final VoidCallback? onOpenMemories;
   final VoidCallback? onOpenNotes;
   final VoidCallback? onOpenDates;
+  final VoidCallback? onOpenMoments;
   final VoidCallback? onOpenSettings;
   final String? coupleStatus;
   final String? mood;
@@ -22,6 +23,7 @@ class ClockHomeScreen extends StatefulWidget {
     this.onOpenMemories,
     this.onOpenNotes,
     this.onOpenDates,
+    this.onOpenMoments,
     this.onOpenSettings,
     this.coupleStatus,
     this.mood,
@@ -288,6 +290,7 @@ class _ClockHomeScreenState extends State<ClockHomeScreen> with SingleTickerProv
                   _dockItem(Icons.photo_library_rounded, 'Memories', widget.onOpenMemories),
                   _dockItem(Icons.note_alt_rounded, 'Notes', widget.onOpenNotes),
                   _dockItem(Icons.calendar_month_rounded, 'Dates', widget.onOpenDates),
+                  _dockItem(Icons.location_on_rounded, 'Moments', widget.onOpenMoments),
                 ],
               ),
             ),

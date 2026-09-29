@@ -20,8 +20,10 @@ import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:cryptography/cryptography.dart' show SecretKey;
 import '../config/api_config.dart';
 import '../services/auth_service.dart';
+import '../services/encryption_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/wave_clipper.dart';
 
@@ -145,6 +147,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     _loadPeerProfile();
     _loadAuthHeaders();
+    _initE2EE();
     fetchMessages(showLoading: messages.isEmpty);
     _initSocket();
     if (!kIsWeb) {
@@ -266,10 +269,81 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  String _decryptMessageIfNeeded(dynamic id, dynamic rawMessage, dynamic nonce, dynamic isEncrypted) {
-    if (rawMessage == null || rawMessage.toString().isEmpty) return '';
-    return rawMessage.toString();
+  SecretKey? _sharedSecretKey;
+  bool _isE2eeReady = false;
+
+  Future<void> _initE2EE() async {
+    try {
+      await EncryptionService().initKeyPair();
+      await AuthService.registerPublicKey(widget.currentUserId);
+
+      final peerUserId = widget.currentUserId == 1 ? 2 : 1;
+      final peerPubKey = await AuthService.getPeerPublicKey(peerUserId);
+
+      if (peerPubKey != null && peerPubKey.isNotEmpty) {
+        final sharedKey = await EncryptionService().getSharedKey(peerPubKey);
+        if (mounted) {
+          setState(() {
+            _sharedSecretKey = sharedKey;
+            _isE2eeReady = true;
+          });
+        }
+        await _redecryptAllLoadedMessages();
+      } else {
+        debugPrint('[E2EE WARNING] Peer public key not found for user $peerUserId');
+      }
+    } catch (e) {
+      debugPrint('[E2EE ERROR] Init failed: $e');
+    }
   }
+
+  Future<void> _redecryptAllLoadedMessages() async {
+    if (_sharedSecretKey == null || messages.isEmpty) return;
+    bool updated = false;
+    for (var i = 0; i < messages.length; i++) {
+      final m = messages[i];
+      final isEncrypted = m['isEncrypted'] == true || m['is_encrypted'] == true;
+      final isDeleted = m['isDeleted'] == true || m['is_deleted'] == true;
+      final nonce = m['nonce'];
+      final rawText = m['rawMessage'] ?? m['message'];
+
+      if (isEncrypted && !isDeleted && nonce != null && rawText != null) {
+        try {
+          final decrypted = await EncryptionService().decryptText(rawText.toString(), nonce.toString(), _sharedSecretKey!);
+          messages[i]['message'] = decrypted;
+          updated = true;
+        } catch (_) {
+          messages[i]['message'] = '[Unable to decrypt message]';
+          updated = true;
+        }
+      }
+    }
+    if (updated && mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<String> _decryptTextAsync(dynamic rawMessage, dynamic nonce, dynamic isEncrypted, bool isDeleted) async {
+    if (isDeleted) return 'This message was deleted';
+    if (rawMessage == null || rawMessage.toString().isEmpty) return '';
+
+    final bool enc = isEncrypted == true || isEncrypted == 'true';
+    if (!enc || nonce == null || nonce.toString().isEmpty) {
+      return rawMessage.toString();
+    }
+
+    if (_sharedSecretKey == null) {
+      return '[Unable to decrypt message]';
+    }
+
+    try {
+      return await EncryptionService().decryptText(rawMessage.toString(), nonce.toString(), _sharedSecretKey!);
+    } catch (_) {
+      return '[Unable to decrypt message]';
+    }
+  }
+
+
 
   Future<void> _loadAuthHeaders() async {
     final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
@@ -513,6 +587,8 @@ class _ChatScreenState extends State<ChatScreen> {
     required String fileName,
     bool isMe = false,
     bool isLocalFile = false,
+    bool isEncryptedMedia = false,
+    String? mediaNonce,
   }) async {
     final msgIdStr = messageId?.toString() ?? rawUrl;
     final cleanName = _decodeFileName(fileName);
@@ -559,6 +635,22 @@ class _ChatScreenState extends State<ChatScreen> {
         final response = await http.get(Uri.parse(formattedUrl), headers: headers);
         if (response.statusCode == 200) {
           Uint8List fileBytes = response.bodyBytes;
+
+          // ── E2EE: decrypt media bytes if this attachment is encrypted ──────
+          if (isEncryptedMedia && mediaNonce != null && mediaNonce.isNotEmpty && _sharedSecretKey != null) {
+            try {
+              fileBytes = await EncryptionService().decryptBytes(fileBytes, mediaNonce, _sharedSecretKey!);
+            } catch (decryptErr) {
+              debugPrint('[E2EE] Media decryption error: $decryptErr');
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Could not decrypt attachment')),
+                );
+              }
+              return;
+            }
+          }
+
           final tempDir = await getApplicationDocumentsDirectory();
           final safeName = cleanName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
           final targetPath = '${tempDir.path}/$safeName';
@@ -605,12 +697,35 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Fetch and decrypt encrypted media bytes; returns plaintext Uint8List.
+  Future<Uint8List> _fetchAndDecryptMediaBytes(String url, String nonce) async {
+    final headers = _authHeaders.isNotEmpty ? _authHeaders : await AuthService.getAuthHeadersForUser(widget.currentUserId);
+    final response = await http.get(Uri.parse(url), headers: headers);
+    if (response.statusCode != 200) {
+      throw Exception('Failed to fetch encrypted media (${response.statusCode})');
+    }
+    if (_sharedSecretKey == null) {
+      throw Exception('E2EE key not ready');
+    }
+    return EncryptionService().decryptBytes(response.bodyBytes, nonce, _sharedSecretKey!);
+  }
+
   Widget _buildEncryptedImageWidget({
     required String url,
     required String? nonce,
     required bool isEncrypted,
     required bool isLocalFile,
+    String? localFilePath,
   }) {
+    // Sender's own local file — show plaintext directly (not encrypted on device)
+    if (localFilePath != null && !kIsWeb && File(localFilePath).existsSync()) {
+      return Image.file(
+        File(localFilePath),
+        width: double.infinity,
+        height: 230,
+        fit: BoxFit.cover,
+      );
+    }
     if (isLocalFile && !kIsWeb) {
       return Image.file(
         File(url),
@@ -620,6 +735,53 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
 
+    // Encrypted image from server — fetch bytes, decrypt, render with Image.memory
+    if (isEncrypted && nonce != null && nonce.isNotEmpty && _isE2eeReady) {
+      final formattedUrl = _getFormattedImageUrl(url) ?? url;
+      return FutureBuilder<Uint8List>(
+        future: _fetchAndDecryptMediaBytes(formattedUrl, nonce),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return Container(
+              height: 200,
+              color: Colors.black12,
+              child: const Center(
+                child: SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: AppTheme.primaryTeal,
+                  ),
+                ),
+              ),
+            );
+          }
+          if (snapshot.hasError || !snapshot.hasData) {
+            return Container(
+              height: 140,
+              color: Colors.grey.shade200,
+              child: const Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.lock_rounded, size: 36, color: Colors.grey),
+                  SizedBox(height: 4),
+                  Text('Could not decrypt image', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                ],
+              ),
+            );
+          }
+          return Image.memory(
+            snapshot.data!,
+            width: double.infinity,
+            height: 230,
+            fit: BoxFit.cover,
+          );
+        },
+      );
+    }
+
+    // Plaintext image from server
     return Image.network(
       url,
       width: double.infinity,
@@ -651,7 +813,7 @@ class _ChatScreenState extends State<ChatScreen> {
           children: [
             Icon(Icons.broken_image_rounded, size: 36, color: Colors.grey),
             SizedBox(height: 4),
-            Text("Could not load image", style: TextStyle(fontSize: 11, color: Colors.grey)),
+            Text('Could not load image', style: TextStyle(fontSize: 11, color: Colors.grey)),
           ],
         ),
       ),
@@ -1010,13 +1172,12 @@ class _ChatScreenState extends State<ChatScreen> {
           : <String, dynamic>{};
 
       final rawText = data['message'] ?? '';
-      final decryptedText = isDeleted
-          ? 'This message was deleted'
-          : _decryptMessageIfNeeded(messageId, rawText, nonce, isEncrypted);
+      final decryptedText = await _decryptTextAsync(rawText, nonce, isEncrypted, isDeleted);
 
       final newMessageMap = {
         'id': messageId,
         'message': decryptedText,
+        'rawMessage': rawText,
         'nonce': nonce,
         'isEncrypted': isEncrypted,
         'is_encrypted': isEncrypted,
@@ -2676,7 +2837,8 @@ class _ChatScreenState extends State<ChatScreen> {
           final List fetchedData = data['data'];
           debugPrint("[CHAT] Messages loaded from persistence: ${fetchedData.length}");
 
-          final List<Map<String, dynamic>> parsedMessages = fetchedData.map<Map<String, dynamic>>((item) {
+          final List<Map<String, dynamic>> parsedMessages = [];
+          for (final item in fetchedData) {
             final rawTime = item['created_at'] != null ? item['created_at'].toString() : '';
             final bool isRead = item['is_read'] == true || item['isRead'] == true;
             final bool isDelivered = isRead || item['is_delivered'] == true || item['isDelivered'] == true;
@@ -2701,8 +2863,6 @@ class _ChatScreenState extends State<ChatScreen> {
             final bool liveStillActive = item['live_location_active'] == true;
 
             String rawText = (item['message'] ?? '').toString();
-            // Live-location messages: the server keeps the last JSON payload with
-            // isLive:true even after sharing ends, so trust the DB flag instead.
             if ((item['attachment_type'] ?? item['attachmentType']) == 'location' && !liveStillActive) {
               try {
                 final locJson = jsonDecode(rawText);
@@ -2714,13 +2874,12 @@ class _ChatScreenState extends State<ChatScreen> {
             }
 
             final msgId = item['id'];
-            final decryptedText = isDeleted
-                ? 'This message was deleted'
-                : _decryptMessageIfNeeded(msgId, rawText, nonce, isEncrypted);
+            final decryptedText = await _decryptTextAsync(rawText, nonce, isEncrypted, isDeleted);
 
-            return <String, dynamic>{
+            parsedMessages.add({
               'id': msgId,
               'message': decryptedText,
+              'rawMessage': rawText,
               'nonce': nonce,
               'isEncrypted': isEncrypted,
               'is_encrypted': isEncrypted,
@@ -2742,7 +2901,6 @@ class _ChatScreenState extends State<ChatScreen> {
               'reply_attachment_name': replyAttachmentName,
               'replyIsDeleted': replyIsDeleted,
               'reply_is_deleted': replyIsDeleted,
-              // Strict message ownership based on senderId
               'isMe': (item['sender_id'] ?? item['senderId']) != null &&
                      int.parse((item['sender_id'] ?? item['senderId']).toString()) == widget.currentUserId,
               'isDelivered': isDelivered,
@@ -2756,8 +2914,8 @@ class _ChatScreenState extends State<ChatScreen> {
               'reactions': reactions,
               'isPinned': isPinnedItem,
               'time': _formatTime(rawTime),
-            };
-          }).toList();
+            });
+          }
 
           debugPrint("=== HISTORY MESSAGE CHECK ===");
           if (parsedMessages.isNotEmpty) {
@@ -3368,9 +3526,39 @@ class _ChatScreenState extends State<ChatScreen> {
 
       request.fields['conversationId'] = widget.conversationId.toString();
       request.fields['senderId'] = widget.currentUserId.toString();
-      request.fields['message'] = caption;
       request.fields['attachmentType'] = attachmentType;
-      request.fields['isEncrypted'] = 'false';
+
+      // ── E2EE: encrypt caption (text) ──────────────────────────────────────
+      String sendText = caption;
+      String? sendNonce;
+      bool isEnc = false;
+      if (caption.isNotEmpty && _isE2eeReady && _sharedSecretKey != null) {
+        final encResult = await EncryptionService().encryptText(caption, _sharedSecretKey!);
+        sendText = encResult['ciphertext']!;
+        sendNonce = encResult['nonce'];
+        isEnc = true;
+      }
+
+      // ── E2EE: encrypt media binary bytes ──────────────────────────────────
+      String uploadFileName = fileName;
+      if (uploadBytes != null && _isE2eeReady && _sharedSecretKey != null) {
+        final encBytesResult = await EncryptionService().encryptBytes(uploadBytes, _sharedSecretKey!);
+        uploadBytes = encBytesResult['bytes'] as Uint8List;
+        // Use media nonce (separate from caption nonce) — store in field
+        final mediaNonce = encBytesResult['nonce'] as String;
+        // Override sendNonce with media nonce (caption already encrypted above)
+        // We store both by sending mediaNonce as the primary nonce for this message
+        sendNonce = mediaNonce;
+        isEnc = true;
+        // Rename to .bin so multer accepts the encrypted blob
+        uploadFileName = '${uploadFileName.replaceAll(RegExp(r'\.[^.]+$'), '')}.bin';
+      }
+
+      request.fields['message'] = sendText;
+      request.fields['isEncrypted'] = isEnc ? 'true' : 'false';
+      if (sendNonce != null) {
+        request.fields['nonce'] = sendNonce;
+      }
       if (replyId != null) {
         request.fields['replyToMessageId'] = replyId.toString();
       }
@@ -3380,7 +3568,7 @@ class _ChatScreenState extends State<ChatScreen> {
           http.MultipartFile.fromBytes(
             'file',
             uploadBytes,
-            filename: fileName,
+            filename: uploadFileName,
           ),
         );
       } else if (filePath != null) {
@@ -3388,7 +3576,7 @@ class _ChatScreenState extends State<ChatScreen> {
           await http.MultipartFile.fromPath(
             'file',
             filePath,
-            filename: fileName,
+            filename: uploadFileName,
           ),
         );
       }
@@ -3400,6 +3588,8 @@ class _ChatScreenState extends State<ChatScreen> {
         final resData = jsonDecode(utf8.decode(response.bodyBytes));
         if (resData['success'] == true && resData['data'] != null) {
           final msgData = resData['data'];
+          final bool savedIsEncrypted = msgData['is_encrypted'] == true;
+          final String? savedNonce = msgData['nonce']?.toString();
 
           if (mounted) {
             setState(() {
@@ -3407,16 +3597,19 @@ class _ChatScreenState extends State<ChatScreen> {
               if (idx != -1) {
                 messages[idx] = {
                   'id': msgData['id'],
-                  'message': caption,
-                  'nonce': msgData['nonce'],
-                  'isEncrypted': false,
-                  'is_encrypted': false,
+                  'message': caption,        // already-decrypted caption for own display
+                  'rawMessage': sendText,    // ciphertext kept for correctness
+                  'nonce': savedNonce,
+                  'isEncrypted': savedIsEncrypted,
+                  'is_encrypted': savedIsEncrypted,
                   'attachmentUrl': msgData['attachment_url'],
-                  'attachmentType': msgData['attachment_type'],
-                  'attachmentName': msgData['attachment_name'],
+                  'attachmentType': attachmentType,  // keep original type (image/audio/file)
+                  'attachmentName': fileName,         // keep original display name
                   'attachmentSize': msgData['attachment_size'],
                   'replyToMessageId': replyId,
                   'isMe': true,
+                  'isLocalFile': (filePath != null && !kIsWeb),
+                  'localFilePath': filePath,         // sender can use local plaintext file
                   'isUploading': false,
                   'isDelivered': msgData['is_delivered'] == true,
                   'is_delivered': msgData['is_delivered'] == true,
@@ -3431,16 +3624,16 @@ class _ChatScreenState extends State<ChatScreen> {
           socket?.emit('sendMessage', {
             'conversationId': widget.conversationId,
             'senderId': widget.currentUserId,
-            'message': msgData['message'] ?? caption,
+            'message': sendText,                  // ciphertext (or plaintext if no key)
             'attachmentUrl': msgData['attachment_url'],
-            'attachmentType': msgData['attachment_type'],
-            'attachmentName': msgData['attachment_name'],
+            'attachmentType': attachmentType,     // original type so recipient knows
+            'attachmentName': fileName,            // original display name
             'attachmentSize': msgData['attachment_size'],
             'replyToMessageId': replyId,
             'tempMsgId': tempMsgId,
             'messageId': msgData['id'],
-            'nonce': msgData['nonce'],
-            'isEncrypted': false,
+            'nonce': savedNonce,
+            'isEncrypted': savedIsEncrypted,
             'isAlreadySaved': true,
           });
         }
@@ -3664,15 +3857,37 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = messageController.text.trim();
     if (text.isEmpty) return;
 
+    if (!_isE2eeReady || _sharedSecretKey == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Secure connection is not ready. Please try again.')),
+      );
+      return;
+    }
+
     _stopTypingEmit();
 
     if (editingMessageId != null) {
+      final encResult = await EncryptionService().encryptText(text, _sharedSecretKey!);
       socket?.emit('editMessage', {
         'conversationId': widget.conversationId,
         'messageId': editingMessageId,
         'senderId': widget.currentUserId,
-        'newMessage': text,
+        'newMessage': encResult['ciphertext'],
+        'nonce': encResult['nonce'],
+        'isEncrypted': true,
       });
+
+      final idx = messages.indexWhere((m) => m['id'] == editingMessageId);
+      if (idx != -1) {
+        setState(() {
+          messages[idx]['message'] = text;
+          messages[idx]['rawMessage'] = encResult['ciphertext'];
+          messages[idx]['nonce'] = encResult['nonce'];
+          messages[idx]['isEdited'] = true;
+          messages[idx]['is_edited'] = true;
+        });
+      }
+
       setState(() {
         editingMessageId = null;
       });
@@ -3684,10 +3899,16 @@ class _ChatScreenState extends State<ChatScreen> {
 
       final String tempMsgId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
 
+      final encResult = await EncryptionService().encryptText(text, _sharedSecretKey!);
+
       final optimisticMsg = {
         'id': tempMsgId,
         'senderId': widget.currentUserId,
         'message': text,
+        'rawMessage': encResult['ciphertext'],
+        'nonce': encResult['nonce'],
+        'isEncrypted': true,
+        'is_encrypted': true,
         'attachmentUrl': null,
         'attachmentType': null,
         'attachmentName': null,
@@ -3714,13 +3935,13 @@ class _ChatScreenState extends State<ChatScreen> {
       });
       _scrollToBottom();
 
-      debugPrint('[CHAT SOCKET] SEND MESSAGE: $text');
+      debugPrint('[CHAT SOCKET] SEND ENCRYPTED MESSAGE (nonce: ${encResult['nonce']})');
       socket?.emit('sendMessage', {
         'conversationId': widget.conversationId,
         'senderId': widget.currentUserId,
-        'message': text,
-        'nonce': null,
-        'isEncrypted': false,
+        'message': encResult['ciphertext'],
+        'nonce': encResult['nonce'],
+        'isEncrypted': true,
         'replyToMessageId': replyId,
         'tempMsgId': tempMsgId,
       });
@@ -4431,9 +4652,10 @@ class _ChatScreenState extends State<ChatScreen> {
                                                         children: [
                                                           _buildEncryptedImageWidget(
                                                             url: formattedImgUrl,
-                                                            nonce: message['nonce'],
+                                                            nonce: message['nonce']?.toString(),
                                                             isEncrypted: message['isEncrypted'] == true || message['is_encrypted'] == true,
                                                             isLocalFile: isLocalFile,
+                                                            localFilePath: message['localFilePath']?.toString(),
                                                           ),
                                                           if (isUploading)
                                                             Container(
@@ -4602,8 +4824,12 @@ class _ChatScreenState extends State<ChatScreen> {
                                                   _VoiceMessagePlayer(
                                                     url: formattedImgUrl ?? '',
                                                     isLocalFile: isLocalFile,
+                                                    localFilePath: message['localFilePath']?.toString(),
                                                     isMe: isMe,
                                                     headers: _authHeaders,
+                                                    isEncrypted: message['isEncrypted'] == true || message['is_encrypted'] == true,
+                                                    nonce: message['nonce']?.toString(),
+                                                    sharedKey: _sharedSecretKey,
                                                   ),
                                                 ] else if (!isDeleted && message['attachmentUrl'] != null && message['attachmentType'] == 'file') ...[
                                                   Builder(
@@ -4624,6 +4850,8 @@ class _ChatScreenState extends State<ChatScreen> {
                                                               fileName: cleanDocName,
                                                               isMe: isMe,
                                                               isLocalFile: isLocalFile,
+                                                              isEncryptedMedia: message['isEncrypted'] == true || message['is_encrypted'] == true,
+                                                              mediaNonce: message['nonce']?.toString(),
                                                             );
                                                           }
                                                         },
@@ -5208,14 +5436,22 @@ class _ChatScreenState extends State<ChatScreen> {
 class _VoiceMessagePlayer extends StatefulWidget {
   final String url;
   final bool isLocalFile;
+  final String? localFilePath;   // sender's own unencrypted local file
   final bool isMe;
   final Map<String, String> headers;
+  final bool isEncrypted;
+  final String? nonce;
+  final SecretKey? sharedKey;    // E2EE shared key for decryption
 
   const _VoiceMessagePlayer({
     required this.url,
     required this.isLocalFile,
+    this.localFilePath,
     required this.isMe,
     required this.headers,
+    this.isEncrypted = false,
+    this.nonce,
+    this.sharedKey,
   });
 
   @override
@@ -5226,6 +5462,7 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
   final AudioPlayer _player = AudioPlayer();
   bool _isPlaying = false;
   bool _isLoaded = false;
+  bool _isDecrypting = false;
   Duration _duration = Duration.zero;
   Duration _position = Duration.zero;
 
@@ -5265,17 +5502,43 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
         return;
       }
       if (!_isLoaded) {
+        // Sender's own local plaintext file — play directly
+        if (widget.localFilePath != null && !kIsWeb && File(widget.localFilePath!).existsSync()) {
+          await _player.play(DeviceFileSource(widget.localFilePath!));
+          _isLoaded = true;
+          return;
+        }
         if (widget.isLocalFile && !kIsWeb) {
           await _player.play(DeviceFileSource(widget.url));
-        } else {
-          await _player.play(UrlSource(widget.url));
+          _isLoaded = true;
+          return;
         }
+        // Encrypted remote audio — fetch, decrypt, write to temp, play
+        if (widget.isEncrypted && widget.nonce != null && widget.sharedKey != null) {
+          if (mounted) setState(() => _isDecrypting = true);
+          try {
+            final response = await http.get(Uri.parse(widget.url), headers: widget.headers);
+            if (response.statusCode != 200) throw Exception('Fetch failed ${response.statusCode}');
+            final plainBytes = await EncryptionService().decryptBytes(
+              response.bodyBytes, widget.nonce!, widget.sharedKey!);
+            final tempDir = await getTemporaryDirectory();
+            final tempFile = File('${tempDir.path}/voice_dec_${DateTime.now().millisecondsSinceEpoch}.m4a');
+            await tempFile.writeAsBytes(plainBytes);
+            await _player.play(DeviceFileSource(tempFile.path));
+            _isLoaded = true;
+          } finally {
+            if (mounted) setState(() => _isDecrypting = false);
+          }
+          return;
+        }
+        // Plaintext remote audio
+        await _player.play(UrlSource(widget.url));
         _isLoaded = true;
       } else {
         await _player.resume();
       }
     } catch (e) {
-      debugPrint("Error playing voice message: $e");
+      debugPrint('Error playing voice message: $e');
     }
   }
 
@@ -5309,7 +5572,7 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
         mainAxisSize: MainAxisSize.min,
         children: [
           GestureDetector(
-            onTap: _togglePlay,
+            onTap: _isDecrypting ? null : _togglePlay,
             child: Container(
               width: 36,
               height: 36,
@@ -5319,11 +5582,19 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
                     : AppTheme.primaryTeal.withValues(alpha: 0.15),
                 shape: BoxShape.circle,
               ),
-              child: Icon(
-                _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                color: fg,
-                size: 22,
-              ),
+              child: _isDecrypting
+                  ? const SizedBox(
+                      width: 18, height: 18,
+                      child: Padding(
+                        padding: EdgeInsets.all(9),
+                        child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.primaryTeal),
+                      ),
+                    )
+                  : Icon(
+                      _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                      color: fg,
+                      size: 22,
+                    ),
             ),
           ),
           const SizedBox(width: 8),
@@ -5347,9 +5618,11 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
                     Icon(Icons.mic_rounded, size: 12, color: fg.withValues(alpha: 0.7)),
                     const SizedBox(width: 3),
                     Text(
-                      _duration.inMilliseconds > 0
-                          ? _fmt(hasElapsed ? _position : _duration)
-                          : 'Voice message',
+                      _isDecrypting
+                          ? 'Decrypting...'
+                          : _duration.inMilliseconds > 0
+                              ? _fmt(hasElapsed ? _position : _duration)
+                              : 'Voice message',
                       style: TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w700,
