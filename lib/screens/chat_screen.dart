@@ -2624,7 +2624,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _sendCallLink() {
     final callRoomId = 'room_${DateTime.now().millisecondsSinceEpoch}';
-    final callLinkMsg = "ðŸ”— Join my DuoCall: https://duochat.call/$callRoomId";
+    final callLinkMsg = "🔗 Join my Clock Call: https://duochat.call/$callRoomId";
 
     messageController.text = callLinkMsg;
     sendMessage();
