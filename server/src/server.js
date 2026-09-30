@@ -195,6 +195,10 @@ const callRingTimeouts = new Map();
 // Global active user socket connections registry: userId -> Set<socketId>
 const userSockets = new Map();
 
+// NEW: Nudge cooldown registry — conversationId -> last-nudge timestamp (ms)
+const nudgeCooldowns = new Map();
+const NUDGE_COOLDOWN_MS = 3000; // 3 seconds between nudges per conversation
+
 // NEW: How long (ms) an outgoing call rings before being auto-cancelled as "missed"
 const CALL_RING_TIMEOUT_MS = 45000;
 
@@ -298,7 +302,6 @@ function clearCallRingTimeout(conversationId) {
 const DISAPPEARING_SWEEP_MS = 30000; // check every 30 seconds
 
 async function sweepExpiredMessages() {
-  // --- Live location shares that have run past their end time ---
   try {
     const liveRes = await pool.query(
       `UPDATE messages
@@ -343,6 +346,59 @@ async function sweepExpiredMessages() {
     }
   } catch (err) {
     console.error("Disappearing-messages sweep error:", err.message);
+  }
+}
+
+// ==================================================
+// SCHEDULED MESSAGES — background sweep to send due messages
+// ==================================================
+const SCHEDULED_SWEEP_MS = 20000; // check every 20 seconds
+
+async function sweepDueScheduledMessages() {
+  try {
+    const dueRes = await pool.query(
+      `SELECT id, conversation_id, sender_id, message
+       FROM scheduled_messages
+       WHERE is_sent = false AND is_cancelled = false AND send_at <= NOW()
+       ORDER BY send_at ASC
+       LIMIT 50`
+    );
+
+    for (const sched of dueRes.rows) {
+      try {
+        // Resolve the conversation's active disappearing-messages timer, same
+        // as any other message sent right now would.
+        let expiresAt = null;
+        const convRes = await pool.query(
+          "SELECT disappearing_timer_seconds FROM conversations WHERE id = $1",
+          [sched.conversation_id]
+        );
+        const timerSeconds = convRes.rows[0]?.disappearing_timer_seconds;
+        if (timerSeconds && Number(timerSeconds) > 0) {
+          expiresAt = new Date(Date.now() + Number(timerSeconds) * 1000);
+        }
+
+        const insertRes = await pool.query(
+          `INSERT INTO messages (conversation_id, sender_id, message, is_delivered, is_read, expires_at)
+           VALUES ($1, $2, $3, false, false, $4)
+           RETURNING id, conversation_id, sender_id, message, attachment_url, attachment_type, attachment_name, attachment_size, reply_to_message_id, nonce, is_encrypted, is_delivered, is_read, is_edited, is_deleted, reactions, expires_at, created_at`,
+          [sched.conversation_id, sched.sender_id, sched.message, expiresAt]
+        );
+        const newMessage = insertRes.rows[0];
+
+        await pool.query("UPDATE scheduled_messages SET is_sent = true WHERE id = $1", [sched.id]);
+
+        const recipientId = Number(sched.sender_id) === 1 ? 2 : 1;
+        io.to(`user_${sched.sender_id}`).emit("newMessage", { ...newMessage, is_mine: true });
+        io.to(`user_${recipientId}`).emit("newMessage", { ...newMessage, is_mine: false });
+
+        console.log(`[SCHEDULED SWEEP] Sent scheduled message ${sched.id} in conversation ${sched.conversation_id} ⏰✅`);
+      } catch (innerErr) {
+        console.error(`Error sending scheduled message ${sched.id}:`, innerErr.message);
+      }
+    }
+  } catch (err) {
+    console.error("Scheduled-messages sweep error:", err.message);
   }
 }
 
@@ -994,154 +1050,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ==================================================
-  // COUPLE STATUS & MOOD SHARING & THINKING OF YOU
-  // ==================================================
-  socket.on("setCoupleStatus", async (data) => {
-    try {
-      const { status, customText } = data || {};
-      const userId = socket.user?.userId || socket.data?.userId;
-      if (!userId || !status) return;
-
-      const result = await pool.query(
-        `INSERT INTO couple_user_status (user_id, status, custom_text, updated_at)
-         VALUES ($1, $2, $3, NOW())
-         ON CONFLICT (user_id) DO UPDATE SET status = EXCLUDED.status, custom_text = EXCLUDED.custom_text, updated_at = NOW()
-         RETURNING user_id, status, custom_text, updated_at`,
-        [userId, status, customText || null]
-      );
-
-      const recipientId = Number(userId) === 1 ? 2 : 1;
-      const statusPayload = {
-        userId: Number(userId),
-        status: result.rows[0].status,
-        customText: result.rows[0].custom_text,
-        updatedAt: result.rows[0].updated_at,
-      };
-
-      io.to(`user_${recipientId}`).emit("coupleStatusUpdated", statusPayload);
-      socket.emit("coupleStatusUpdated", statusPayload);
-      console.log(`User ${userId} updated couple status: ${status} 🟢`);
-    } catch (err) {
-      console.error("Error in setCoupleStatus socket event:", err.message);
-    }
-  });
-
-  socket.on("setMood", async (data) => {
-    try {
-      const { mood } = data || {};
-      const userId = socket.user?.userId || socket.data?.userId;
-      if (!userId) return;
-
-      const result = await pool.query(
-        `INSERT INTO user_moods (user_id, mood, updated_at)
-         VALUES ($1, $2, NOW())
-         ON CONFLICT (user_id) DO UPDATE SET mood = EXCLUDED.mood, updated_at = NOW()
-         RETURNING user_id, mood, updated_at`,
-        [userId, mood || null]
-      );
-
-      const recipientId = Number(userId) === 1 ? 2 : 1;
-      const moodPayload = {
-        userId: Number(userId),
-        mood: result.rows[0].mood,
-        updatedAt: result.rows[0].updated_at,
-      };
-
-      io.to(`user_${recipientId}`).emit("moodUpdated", moodPayload);
-      socket.emit("moodUpdated", moodPayload);
-      console.log(`User ${userId} updated mood: ${mood} 😊`);
-    } catch (err) {
-      console.error("Error in setMood socket event:", err.message);
-    }
-  });
-
-  const thinkingOfYouCooldowns = new Map();
-
-  socket.on("thinkingOfYou", async (data) => {
-    try {
-      const { conversationId } = data || {};
-      const senderId = socket.user?.userId || socket.data?.userId;
-      if (!conversationId || !senderId) return;
-
-      const lastSent = thinkingOfYouCooldowns.get(senderId) || 0;
-      const now = Date.now();
-      if (now - lastSent < 30000) {
-        console.warn(`ThinkingOfYou rate-limited for user ${senderId}`);
-        return;
-      }
-      thinkingOfYouCooldowns.set(senderId, now);
-
-      const recipientId = Number(senderId) === 1 ? 2 : 1;
-      io.to(`user_${recipientId}`).emit("thinkingOfYouReceived", {
-        senderId: Number(senderId),
-        conversationId: Number(conversationId),
-        timestamp: now,
-      });
-
-      const room = String(conversationId);
-      const roomSockets = io.sockets.adapter.rooms.get(room);
-      let isRecipientActiveInRoom = false;
-      if (roomSockets) {
-        for (const socketId of roomSockets) {
-          const s = io.sockets.sockets.get(socketId);
-          if (s && s.data && s.data.userId && Number(s.data.userId) === Number(recipientId)) {
-            isRecipientActiveInRoom = true;
-            break;
-          }
-        }
-      }
-      if (!isRecipientActiveInRoom) {
-        await sendPushNotification({
-          recipientId,
-          title: "Clock",
-          body: "💭 Thinking of You",
-          dataPayload: { conversationId: String(conversationId), type: "thinking_of_you" },
-        });
-      }
-      console.log(`User ${senderId} sent "Thinking of You" to User ${recipientId} 💭❤️`);
-    } catch (err) {
-      console.error("Error in thinkingOfYou socket event:", err.message);
-    }
-  });
-
-  // Phase 4 Couple Experience Socket Events
-  socket.on("importantDateChanged", (data) => {
-    const senderId = socket.user?.userId || socket.data?.userId;
-    if (!senderId) return;
-    socket.broadcast.emit("importantDateChanged", data);
-  });
-
-  socket.on("dailyQuestionAnswered", (data) => {
-    const senderId = socket.user?.userId || socket.data?.userId;
-    if (!senderId) return;
-    socket.broadcast.emit("dailyQuestionAnswered", data);
-  });
-
-  socket.on("memoryChanged", (data) => {
-    const senderId = socket.user?.userId || socket.data?.userId;
-    if (!senderId) return;
-    socket.broadcast.emit("memoryChanged", data);
-  });
-
-  socket.on("noteChanged", (data) => {
-    const senderId = socket.user?.userId || socket.data?.userId;
-    if (!senderId) return;
-    socket.broadcast.emit("noteChanged", data);
-  });
-
-  socket.on("routineUpdated", (data) => {
-    const senderId = socket.user?.userId || socket.data?.userId;
-    if (!senderId) return;
-    socket.broadcast.emit("routineUpdated", data);
-  });
-
-  socket.on("sharedMomentChanged", (data) => {
-    const senderId = socket.user?.userId || socket.data?.userId;
-    if (!senderId) return;
-    socket.broadcast.emit("sharedMomentChanged", data);
-  });
-
   // React to Message Event
   socket.on("reactToMessage", async (data) => {
     try {
@@ -1282,6 +1190,175 @@ io.on("connection", (socket) => {
   });
 
   // ==================================================
+  // SCHEDULED MESSAGES
+  // ==================================================
+  socket.on("scheduleMessage", async (data) => {
+    try {
+      const { conversationId, message, sendAtIso } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId || !message || !sendAtIso) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, senderId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      const sendAt = new Date(sendAtIso);
+      if (isNaN(sendAt.getTime()) || sendAt.getTime() <= Date.now()) {
+        return socket.emit("scheduleMessageError", { message: "Scheduled time must be in the future" });
+      }
+
+      const result = await pool.query(
+        `INSERT INTO scheduled_messages (conversation_id, sender_id, message, send_at)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, conversation_id, sender_id, message, send_at, is_sent, is_cancelled, created_at`,
+        [conversationId, senderId, message, sendAt]
+      );
+
+      socket.emit("scheduledMessageCreated", { scheduled: result.rows[0] });
+      console.log(`Message scheduled by User ${senderId} in conversation ${conversationId} for ${sendAt.toISOString()} ⏰`);
+    } catch (err) {
+      console.error("Error in scheduleMessage socket event:", err.message);
+    }
+  });
+
+  socket.on("cancelScheduledMessage", async (data) => {
+    try {
+      const { id } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!id || !senderId) return;
+
+      const result = await pool.query(
+        `UPDATE scheduled_messages
+         SET is_cancelled = true
+         WHERE id = $1 AND sender_id = $2 AND is_sent = false
+         RETURNING id`,
+        [id, senderId]
+      );
+
+      if (result.rowCount > 0) {
+        socket.emit("scheduledMessageCancelled", { id: Number(id) });
+        console.log(`Scheduled message ${id} cancelled by User ${senderId} ⏰❌`);
+      }
+    } catch (err) {
+      console.error("Error in cancelScheduledMessage socket event:", err.message);
+    }
+  });
+
+  // ==================================================
+  // SHARED COUNTDOWN / ANNIVERSARY TRACKER
+  // ==================================================
+  socket.on("addSpecialDate", async (data) => {
+    try {
+      const { conversationId, title, eventDate, isRecurringYearly } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !userId || !title || !eventDate) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, userId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      const result = await pool.query(
+        `INSERT INTO special_dates (conversation_id, title, event_date, is_recurring_yearly, created_by)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, conversation_id, title, event_date, is_recurring_yearly, created_by, created_at`,
+        [conversationId, String(title).slice(0, 120), eventDate, isRecurringYearly !== false, userId]
+      );
+
+      const room = String(conversationId);
+      io.to(room).emit("specialDateAdded", { conversationId: Number(conversationId), date: result.rows[0] });
+      console.log(`Special date "${title}" added to conversation ${conversationId} by User ${userId} 🎉`);
+    } catch (err) {
+      console.error("Error in addSpecialDate socket event:", err.message);
+    }
+  });
+
+  socket.on("deleteSpecialDate", async (data) => {
+    try {
+      const { conversationId, id } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !id || !userId) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, userId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      await pool.query("DELETE FROM special_dates WHERE id = $1 AND conversation_id = $2", [id, conversationId]);
+
+      const room = String(conversationId);
+      io.to(room).emit("specialDateDeleted", { conversationId: Number(conversationId), id: Number(id) });
+    } catch (err) {
+      console.error("Error in deleteSpecialDate socket event:", err.message);
+    }
+  });
+
+  // ==================================================
+  // NUDGE / "THINKING OF YOU"
+  // ==================================================
+  socket.on("sendNudge", async (data) => {
+    try {
+      const { conversationId } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, senderId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      // Per-conversation cooldown so a nudge can't be spammed
+      const cooldownKey = String(conversationId);
+      const lastNudge = nudgeCooldowns.get(cooldownKey) || 0;
+      const now = Date.now();
+      if (now - lastNudge < NUDGE_COOLDOWN_MS) {
+        return socket.emit("nudgeError", {
+          message: "Please wait a moment before nudging again",
+          retryAfterMs: NUDGE_COOLDOWN_MS - (now - lastNudge),
+        });
+      }
+      nudgeCooldowns.set(cooldownKey, now);
+
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+      const room = String(conversationId);
+
+      io.to(room).to(`user_${recipientId}`).emit("nudgeReceived", {
+        conversationId: Number(conversationId),
+        senderId: Number(senderId),
+      });
+      console.log(`User ${senderId} sent a nudge in conversation ${conversationId} 👋`);
+
+      // Push notification if the recipient isn't actively viewing the chat
+      const roomSockets = io.sockets.adapter.rooms.get(room);
+      let isRecipientActiveInRoom = false;
+      if (roomSockets) {
+        for (const socketId of roomSockets) {
+          const s = io.sockets.sockets.get(socketId);
+          if (s && s.data && s.data.userId && Number(s.data.userId) === Number(recipientId)) {
+            isRecipientActiveInRoom = true;
+            break;
+          }
+        }
+      }
+      if (!isRecipientActiveInRoom) {
+        await sendPushNotification({
+          recipientId,
+          title: "Clock",
+          body: "💌 Thinking of you",
+          dataPayload: { conversationId: String(conversationId), type: "nudge" },
+        });
+      }
+    } catch (err) {
+      console.error("Error in sendNudge socket event:", err.message);
+    }
+  });
+
+  // ==================================================
   // PHASE 4: WEBRTC 1-TO-1 CALL SIGNALING HANDLERS
   // ==================================================
 
@@ -1307,11 +1384,27 @@ io.on("connection", (socket) => {
       }
 
       const recipientId = Number(callerId) === 1 ? 2 : 1;
+
+      // NEW: Call History — create the log row up front, status starts "ringing"
+      let callLogId = null;
+      try {
+        const logRes = await pool.query(
+          `INSERT INTO call_logs (conversation_id, caller_id, recipient_id, is_video_call, status, started_at)
+           VALUES ($1, $2, $3, $4, 'ringing', NOW())
+           RETURNING id`,
+          [conversationId, callerId, recipientId, !!isVideoCall]
+        );
+        callLogId = logRes.rows[0]?.id || null;
+      } catch (logErr) {
+        console.error("Error creating call_logs row:", logErr.message);
+      }
+
       activeCalls.set(String(conversationId), {
         callerId: Number(callerId),
         recipientId: Number(recipientId),
         isVideoCall: !!isVideoCall,
         status: "calling",
+        callLogId,
       });
 
       console.log(`Call initiated by User ${callerId} to User ${recipientId} in conversation ${conversationId} (Video: ${!!isVideoCall}) 📞`);
@@ -1360,6 +1453,13 @@ io.on("connection", (socket) => {
           activeCalls.delete(String(conversationId));
           callRingTimeouts.delete(String(conversationId));
 
+          if (stillRinging.callLogId) {
+            pool.query(
+              "UPDATE call_logs SET status = 'missed', ended_at = NOW() WHERE id = $1",
+              [stillRinging.callLogId]
+            ).catch((e) => console.error("Error marking call_logs as missed:", e.message));
+          }
+
           io.to(`user_${callerId}`).emit("callMissed", {
             conversationId: Number(conversationId),
           });
@@ -1404,6 +1504,15 @@ io.on("connection", (socket) => {
       if (call) {
         call.status = "active";
         console.log(`Call accepted by User ${userId} in conversation ${conversationId} ✅`);
+
+        // NEW: Call History — mark as answered
+        if (call.callLogId) {
+          pool.query(
+            "UPDATE call_logs SET status = 'answered', answered_at = NOW() WHERE id = $1",
+            [call.callLogId]
+          ).catch((e) => console.error("Error marking call_logs as answered:", e.message));
+        }
+
         io.to(`user_${call.callerId}`).emit("callAccepted", {
           conversationId: Number(conversationId),
           acceptedBy: Number(userId),
@@ -1425,6 +1534,15 @@ io.on("connection", (socket) => {
       const call = activeCalls.get(String(conversationId));
       if (call) {
         console.log(`Call rejected by User ${userId} in conversation ${conversationId} ❌`);
+
+        // NEW: Call History — mark as declined
+        if (call.callLogId) {
+          pool.query(
+            "UPDATE call_logs SET status = 'declined', ended_at = NOW() WHERE id = $1",
+            [call.callLogId]
+          ).catch((e) => console.error("Error marking call_logs as declined:", e.message));
+        }
+
         io.to(`user_${call.callerId}`).emit("callRejected", {
           conversationId: Number(conversationId),
           rejectedBy: Number(userId),
@@ -1448,6 +1566,15 @@ io.on("connection", (socket) => {
       const call = activeCalls.get(String(conversationId));
       if (call && Number(call.callerId) === Number(userId)) {
         console.log(`Call cancelled by caller User ${userId} in conversation ${conversationId} 🚫`);
+
+        // NEW: Call History — mark as cancelled
+        if (call.callLogId) {
+          pool.query(
+            "UPDATE call_logs SET status = 'cancelled', ended_at = NOW() WHERE id = $1",
+            [call.callLogId]
+          ).catch((e) => console.error("Error marking call_logs as cancelled:", e.message));
+        }
+
         io.to(`user_${call.recipientId}`).emit("callCancelled", {
           conversationId: Number(conversationId),
           cancelledBy: Number(userId),
@@ -1536,6 +1663,21 @@ io.on("connection", (socket) => {
 
       // NEW: call ended — cancel any pending ring-timeout
       clearCallRingTimeout(conversationId);
+
+      const call = activeCalls.get(String(conversationId));
+
+      // NEW: Call History — compute final duration for an answered call.
+      // ended_at IS NULL guards against a race where endCall fires twice.
+      if (call && call.callLogId) {
+        pool.query(
+          `UPDATE call_logs
+           SET ended_at = NOW(),
+               duration_seconds = CASE WHEN answered_at IS NOT NULL THEN GREATEST(EXTRACT(EPOCH FROM (NOW() - answered_at))::int, 0) ELSE 0 END,
+               status = CASE WHEN answered_at IS NOT NULL THEN 'answered' ELSE status END
+           WHERE id = $1 AND ended_at IS NULL`,
+          [call.callLogId]
+        ).catch((e) => console.error("Error finalizing call_logs duration:", e.message));
+      }
 
       activeCalls.delete(String(conversationId));
       const recipientId = Number(senderId) === 1 ? 2 : 1;
@@ -1670,4 +1812,8 @@ server.listen(PORT, () => {
   // NEW: Live location — periodic sweep to auto-end expired live shares
   setInterval(sweepExpiredLiveLocations, LIVE_LOCATION_SWEEP_MS);
   setTimeout(sweepExpiredLiveLocations, 5000);
+
+  // NEW: Scheduled messages — periodic sweep to send due messages
+  setInterval(sweepDueScheduledMessages, SCHEDULED_SWEEP_MS);
+  setTimeout(sweepDueScheduledMessages, 5000);
 });

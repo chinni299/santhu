@@ -2648,9 +2648,189 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (pickedTime == null || !mounted) return;
 
-    final scheduleText = "\u{1F4C5} Scheduled Duo Call for ${pickedDate.day}/${pickedDate.month}/${pickedDate.year} at ${pickedTime.format(context)}";
+    final scheduleText = "📅 Scheduled Clock Call for ${pickedDate.day}/${pickedDate.month}/${pickedDate.year} at ${pickedTime.format(context)}";
     messageController.text = scheduleText;
     sendMessage();
+  }
+
+  Widget _buildCallLinkCard({
+    required String messageText,
+    required bool isMe,
+    required bool isDark,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      margin: const EdgeInsets.only(bottom: 2),
+      decoration: BoxDecoration(
+        color: isMe
+            ? Colors.white.withValues(alpha: 0.18)
+            : (isDark ? const Color(0xFF1F2C33) : Colors.white),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: isMe ? Colors.white30 : AppTheme.primaryTeal.withValues(alpha: 0.35),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: const BoxDecoration(
+                  color: AppTheme.primaryTeal,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.video_call_rounded,
+                  color: Colors.white,
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Clock Video Call',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 14.5,
+                        color: isMe ? Colors.white : (isDark ? Colors.white : Colors.black87),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Private Encrypted Call Link',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                        color: isMe ? Colors.white70 : (isDark ? Colors.white60 : Colors.black54),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () => _openCallScreen(isVideoCall: true, isCaller: true),
+              icon: const Icon(Icons.call_rounded, size: 18),
+              label: const Text('Join Call Now', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isMe ? Colors.white : AppTheme.primaryTeal,
+                foregroundColor: isMe ? AppTheme.primaryTeal : Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                elevation: 0,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildScheduledCallCard({
+    required String messageText,
+    required bool isMe,
+    required bool isDark,
+  }) {
+    final String displayTime = messageText
+        .replaceAll('📅 Scheduled Duo Call for ', '')
+        .replaceAll('📅 Scheduled Clock Call for ', '')
+        .replaceAll('📅 Scheduled Call for ', '')
+        .replaceAll('\u{1F4C5} Scheduled Duo Call for ', '')
+        .replaceAll('\u{1F4C5} Scheduled Clock Call for ', '')
+        .trim();
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      margin: const EdgeInsets.only(bottom: 2),
+      decoration: BoxDecoration(
+        color: isMe
+            ? Colors.white.withValues(alpha: 0.18)
+            : (isDark ? const Color(0xFF1F2C33) : Colors.white),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: isMe ? Colors.white30 : AppTheme.primaryTeal.withValues(alpha: 0.35),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.amber.shade700,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.event_available_rounded,
+                  color: Colors.white,
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Scheduled Clock Call',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w900,
+                        fontSize: 14.5,
+                        color: isMe ? Colors.white : (isDark ? Colors.white : Colors.black87),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      displayTime.isNotEmpty ? displayTime : messageText,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: isMe ? Colors.white70 : (isDark ? Colors.white70 : Colors.black87),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () => _openCallScreen(isVideoCall: true, isCaller: true),
+              icon: const Icon(Icons.call_rounded, size: 18),
+              label: const Text('Start / Join Scheduled Call', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isMe ? Colors.white : AppTheme.primaryTeal,
+                foregroundColor: isMe ? AppTheme.primaryTeal : Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                elevation: 0,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _startNewGroupCall() {
@@ -4951,19 +5131,49 @@ class _ChatScreenState extends State<ChatScreen> {
                                                       );
                                                     },
                                                   ),
+                                                ] else if (!isDeleted) ...[
+                                                  Builder(
+                                                    builder: (context) {
+                                                      final String msgStr = message['message']?.toString() ?? '';
+                                                      final bool isCallLink = msgStr.contains('duochat.call') ||
+                                                          msgStr.contains('clock.call') ||
+                                                          msgStr.contains('Join my Clock Call') ||
+                                                          msgStr.contains('Join my DuoCall') ||
+                                                          msgStr.contains('Join my Duo Call');
+                                                      final bool isScheduledCall = msgStr.contains('Scheduled Duo Call') ||
+                                                          msgStr.contains('Scheduled Clock Call') ||
+                                                          msgStr.contains('Scheduled Call') ||
+                                                          msgStr.contains('📅 Scheduled') ||
+                                                          msgStr.contains('📆 Scheduled');
+
+                                                      if (isCallLink) {
+                                                        return _buildCallLinkCard(messageText: msgStr, isMe: isMe, isDark: isDark);
+                                                      } else if (isScheduledCall) {
+                                                        return _buildScheduledCallCard(messageText: msgStr, isMe: isMe, isDark: isDark);
+                                                      }
+
+                                                      return SelectableText(
+                                                        msgStr,
+                                                        style: TextStyle(
+                                                          color: isMe
+                                                              ? Colors.white
+                                                              : (isDark ? Colors.white : const Color(0xFF111B21)),
+                                                          fontSize: 15,
+                                                          height: 1.25,
+                                                          fontWeight: FontWeight.w800,
+                                                        ),
+                                                      );
+                                                    },
+                                                  ),
                                                 ] else ...[
                                                   SelectableText(
-                                                    isDeleted ? 'This message was deleted' : message['message'].toString(),
+                                                    'This message was deleted',
                                                     style: TextStyle(
-                                                      color: isMe
-                                                          ? Colors.white
-                                                          : (isDeleted
-                                                              ? Colors.grey.shade500
-                                                              : (isDark ? Colors.white : const Color(0xFF111B21))),
+                                                      color: Colors.grey.shade500,
                                                       fontSize: 15,
                                                       height: 1.25,
-                                                      fontWeight: isDeleted ? FontWeight.w500 : FontWeight.w800,
-                                                      fontStyle: isDeleted ? FontStyle.italic : FontStyle.normal,
+                                                      fontWeight: FontWeight.w500,
+                                                      fontStyle: FontStyle.italic,
                                                     ),
                                                   ),
                                                 ],

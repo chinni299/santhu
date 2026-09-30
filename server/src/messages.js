@@ -69,87 +69,59 @@ pool.query(`
   console.error("Migration error for live-location columns:", err.message);
 });
 
-// Migration for Couple Status & Moods
+// Migration for Call History
 pool.query(`
-  CREATE TABLE IF NOT EXISTS couple_user_status (
-    user_id INTEGER PRIMARY KEY,
-    status VARCHAR(32) NOT NULL DEFAULT 'online',
-    custom_text TEXT,
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-  );
-  CREATE TABLE IF NOT EXISTS user_moods (
-    user_id INTEGER PRIMARY KEY,
-    mood VARCHAR(32),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-  );
-  CREATE TABLE IF NOT EXISTS important_dates (
+  CREATE TABLE IF NOT EXISTS call_logs (
     id SERIAL PRIMARY KEY,
-    title TEXT NOT NULL,
-    date_type VARCHAR(32) NOT NULL DEFAULT 'custom',
-    date_value TIMESTAMPTZ NOT NULL,
-    note TEXT,
-    created_by INTEGER NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-  );
-  CREATE TABLE IF NOT EXISTS daily_questions (
-    id SERIAL PRIMARY KEY,
-    question_text TEXT NOT NULL,
-    question_date DATE UNIQUE NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-  );
-  CREATE TABLE IF NOT EXISTS daily_question_answers (
-    id SERIAL PRIMARY KEY,
-    question_id INTEGER REFERENCES daily_questions(id) ON DELETE CASCADE,
-    user_id INTEGER NOT NULL,
-    answer_text TEXT NOT NULL,
-    answered_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(question_id, user_id)
-  );
-  CREATE TABLE IF NOT EXISTS private_memories (
-    id SERIAL PRIMARY KEY,
-    type VARCHAR(16) NOT NULL DEFAULT 'photo',
-    media_url TEXT NOT NULL,
-    caption TEXT,
-    memory_date TIMESTAMPTZ NOT NULL,
-    created_by INTEGER NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-  );
-  CREATE TABLE IF NOT EXISTS shared_notes (
-    id SERIAL PRIMARY KEY,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    created_by INTEGER NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-  );
-  CREATE TABLE IF NOT EXISTS couple_routines (
-    user_id INTEGER PRIMARY KEY,
-    morning_enabled BOOLEAN DEFAULT false,
-    morning_time VARCHAR(8) DEFAULT '08:00',
-    night_enabled BOOLEAN DEFAULT false,
-    night_time VARCHAR(8) DEFAULT '22:00',
-    custom_morning_msg TEXT,
-    custom_night_msg TEXT,
-    sound_enabled BOOLEAN DEFAULT true,
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-  );
-  CREATE TABLE IF NOT EXISTS shared_moments (
-    id SERIAL PRIMARY KEY,
-    created_by INTEGER NOT NULL,
-    caption TEXT,
-    media_url TEXT,
-    latitude DOUBLE PRECISION,
-    longitude DOUBLE PRECISION,
-    location_enabled BOOLEAN DEFAULT false,
-    moment_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    conversation_id INTEGER NOT NULL,
+    caller_id INTEGER NOT NULL,
+    recipient_id INTEGER NOT NULL,
+    is_video_call BOOLEAN DEFAULT false,
+    status VARCHAR(20) NOT NULL DEFAULT 'ringing', -- ringing | answered | missed | declined | cancelled
+    duration_seconds INTEGER DEFAULT 0,
+    started_at TIMESTAMPTZ DEFAULT NOW(),
+    answered_at TIMESTAMPTZ,
+    ended_at TIMESTAMPTZ
   );
 `).then(() => {
-  console.log("Couple-status & user-moods tables verified ✅");
+  console.log("call_logs table verified ✅");
 }).catch((err) => {
-  console.error("Migration error for couple-status/user-moods:", err.message);
+  console.error("Migration error for call_logs table:", err.message);
+});
+
+// Migration for Scheduled Messages
+pool.query(`
+  CREATE TABLE IF NOT EXISTS scheduled_messages (
+    id SERIAL PRIMARY KEY,
+    conversation_id INTEGER NOT NULL,
+    sender_id INTEGER NOT NULL,
+    message TEXT NOT NULL,
+    send_at TIMESTAMPTZ NOT NULL,
+    is_sent BOOLEAN DEFAULT false,
+    is_cancelled BOOLEAN DEFAULT false,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  );
+`).then(() => {
+  console.log("scheduled_messages table verified ✅");
+}).catch((err) => {
+  console.error("Migration error for scheduled_messages table:", err.message);
+});
+
+// Migration for Shared Countdown / Anniversary Tracker
+pool.query(`
+  CREATE TABLE IF NOT EXISTS special_dates (
+    id SERIAL PRIMARY KEY,
+    conversation_id INTEGER NOT NULL,
+    title VARCHAR(120) NOT NULL,
+    event_date DATE NOT NULL,
+    is_recurring_yearly BOOLEAN DEFAULT true,
+    created_by INTEGER NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  );
+`).then(() => {
+  console.log("special_dates table verified ✅");
+}).catch((err) => {
+  console.error("Migration error for special_dates table:", err.message);
 });
 
 const DANGEROUS_EXTENSIONS = new Set([
@@ -216,58 +188,6 @@ router.get("/test", (req, res) => {
     success: true,
     message: "Messages router is mounted correctly ✅",
   });
-});
-
-// SHARED MOMENTS
-router.get("/shared-moments", async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT id, created_by, caption, media_url, latitude, longitude, location_enabled, moment_date, created_at, updated_at FROM shared_moments ORDER BY moment_date DESC"
-    );
-    res.json({ success: true, data: result.rows });
-  } catch (error) {
-    console.error("Get shared moments error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to fetch shared moments" });
-  }
-});
-
-router.post("/shared-moments", upload.single("media"), async (req, res) => {
-  try {
-    const userId = req.user.id || req.user.userId;
-    const { caption, latitude, longitude, location_enabled, moment_date } = req.body;
-
-    let mediaUrl = req.body.media_url || null;
-    if (req.file) {
-      mediaUrl = `/messages/media/${req.file.filename}`;
-    }
-
-    const locEnabled = location_enabled === true || location_enabled === 'true';
-    const lat = locEnabled && latitude ? parseFloat(latitude) : null;
-    const lng = locEnabled && longitude ? parseFloat(longitude) : null;
-
-    const result = await pool.query(
-      `INSERT INTO shared_moments (created_by, caption, media_url, latitude, longitude, location_enabled, moment_date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, created_by, caption, media_url, latitude, longitude, location_enabled, moment_date, created_at, updated_at`,
-      [userId, caption || null, mediaUrl, lat, lng, locEnabled, moment_date || new Date()]
-    );
-
-    res.json({ success: true, data: result.rows[0] });
-  } catch (error) {
-    console.error("Create shared moment error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to create shared moment" });
-  }
-});
-
-router.delete("/shared-moments/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    await pool.query("DELETE FROM shared_moments WHERE id = $1", [id]);
-    res.json({ success: true, message: "Shared moment deleted successfully" });
-  } catch (error) {
-    console.error("Delete shared moment error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to delete shared moment" });
-  }
 });
 
 // GET SECURE PRIVATE ATTACHMENT BY MESSAGE ID
@@ -968,374 +888,91 @@ router.get("/on-this-day/:conversationId", async (req, res) => {
   }
 });
 
-// GET COUPLE STATUS FOR A USER
-router.get("/couple-status/:userId", async (req, res) => {
+// GET CALL HISTORY FOR A CONVERSATION
+router.get("/calls/:conversationId", async (req, res) => {
   try {
-    const { userId } = req.params;
-    const result = await pool.query(
-      "SELECT user_id, status, custom_text, updated_at FROM couple_user_status WHERE user_id = $1",
-      [userId]
-    );
-    res.json({
-      success: true,
-      data: result.rows[0] || { user_id: Number(userId), status: "online", custom_text: null, updated_at: new Date() },
-    });
-  } catch (error) {
-    console.error("Get couple status error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to fetch status" });
-  }
-});
+    const { conversationId } = req.params;
+    const authUserId = req.user.id;
 
-// ==================================================
-// PHASE 4 — REST API ENDPOINTS
-// ==================================================
-
-// 1. IMPORTANT DATES
-router.get("/important-dates", async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT id, title, date_type, date_value, note, created_by, created_at, updated_at FROM important_dates ORDER BY date_value ASC"
+    const memberCheck = await pool.query(
+      "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+      [conversationId, authUserId]
     );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ success: false, message: "Not authorized for this conversation" });
+    }
+
+    const result = await pool.query(
+      `SELECT id, conversation_id, caller_id, recipient_id, is_video_call, status, duration_seconds, started_at, answered_at, ended_at
+       FROM call_logs
+       WHERE conversation_id = $1
+       ORDER BY started_at DESC
+       LIMIT 100`,
+      [conversationId]
+    );
+
     res.json({ success: true, data: result.rows });
   } catch (error) {
-    console.error("Get important dates error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to fetch important dates" });
+    console.error("Get call history error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to fetch call history" });
   }
 });
 
-router.post("/important-dates", async (req, res) => {
+// GET PENDING SCHEDULED MESSAGES FOR A CONVERSATION (sender's own, not-yet-sent)
+router.get("/scheduled/:conversationId", async (req, res) => {
   try {
-    const { title, date_type, date_value, note } = req.body;
-    const userId = req.user.userId;
-    if (!title || !date_value) {
-      return res.status(400).json({ success: false, message: "Title and date_value are required" });
+    const { conversationId } = req.params;
+    const authUserId = req.user.id;
+
+    const memberCheck = await pool.query(
+      "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+      [conversationId, authUserId]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ success: false, message: "Not authorized for this conversation" });
     }
+
     const result = await pool.query(
-      `INSERT INTO important_dates (title, date_type, date_value, note, created_by)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, title, date_type, date_value, note, created_by, created_at, updated_at`,
-      [title, date_type || 'custom', date_value, note || null, userId]
-    );
-    res.json({ success: true, data: result.rows[0] });
-  } catch (error) {
-    console.error("Create important date error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to create important date" });
-  }
-});
-
-router.put("/important-dates/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { title, date_type, date_value, note } = req.body;
-    const result = await pool.query(
-      `UPDATE important_dates
-       SET title = COALESCE($1, title),
-           date_type = COALESCE($2, date_type),
-           date_value = COALESCE($3, date_value),
-           note = COALESCE($4, note),
-           updated_at = NOW()
-       WHERE id = $5
-       RETURNING id, title, date_type, date_value, note, created_by, created_at, updated_at`,
-      [title, date_type, date_value, note, id]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, message: "Date not found" });
-    }
-    res.json({ success: true, data: result.rows[0] });
-  } catch (error) {
-    console.error("Update important date error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to update important date" });
-  }
-});
-
-router.delete("/important-dates/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    await pool.query("DELETE FROM important_dates WHERE id = $1", [id]);
-    res.json({ success: true, message: "Date deleted successfully" });
-  } catch (error) {
-    console.error("Delete important date error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to delete important date" });
-  }
-});
-
-// 2. DAILY QUESTION
-const DEFAULT_QUESTIONS = [
-  "What is one thing you love about me?",
-  "What should we do together this weekend?",
-  "What is your favorite memory of us?",
-  "What made you smile today?",
-  "Where is your dream vacation with me?",
-  "What song reminds you of us?",
-  "What is your favorite date we've had?"
-];
-
-router.get("/daily-question/today", async (req, res) => {
-  try {
-    const userId = req.user.userId;
-    const todayStr = new Date().toISOString().split('T')[0];
-
-    let qRes = await pool.query("SELECT * FROM daily_questions WHERE question_date = $1", [todayStr]);
-    let question;
-    if (qRes.rows.length === 0) {
-      const qIndex = Math.floor(Math.abs(new Date(todayStr).getTime()) / (1000 * 60 * 60 * 24)) % DEFAULT_QUESTIONS.length;
-      const qText = DEFAULT_QUESTIONS[qIndex];
-      const insertRes = await pool.query(
-        "INSERT INTO daily_questions (question_text, question_date) VALUES ($1, $2) ON CONFLICT (question_date) DO UPDATE SET question_text = EXCLUDED.question_text RETURNING *",
-        [qText, todayStr]
-      );
-      question = insertRes.rows[0];
-    } else {
-      question = qRes.rows[0];
-    }
-
-    const answersRes = await pool.query(
-      "SELECT user_id, answer_text, answered_at FROM daily_question_answers WHERE question_id = $1",
-      [question.id]
+      `SELECT id, conversation_id, sender_id, message, send_at, is_sent, is_cancelled, created_at
+       FROM scheduled_messages
+       WHERE conversation_id = $1 AND sender_id = $2 AND is_sent = false AND is_cancelled = false
+       ORDER BY send_at ASC`,
+      [conversationId, authUserId]
     );
 
-    const answers = answersRes.rows;
-    const myAnswerObj = answers.find(a => Number(a.user_id) === Number(userId));
-    const partnerAnswerObj = answers.find(a => Number(a.user_id) !== Number(userId));
-
-    const bothAnswered = answers.length >= 2;
-    const myAnswer = myAnswerObj ? myAnswerObj.answer_text : null;
-    
-    // STRICT SECURITY RULE: Partner answer is NEVER revealed until requesting user has ALSO answered!
-    const partnerAnswer = (myAnswer && partnerAnswerObj) ? partnerAnswerObj.answer_text : null;
-    const hasPartnerAnswered = !!partnerAnswerObj;
-
-    res.json({
-      success: true,
-      data: {
-        id: question.id,
-        questionText: question.question_text,
-        questionDate: question.question_date,
-        myAnswer,
-        partnerAnswer,
-        hasPartnerAnswered,
-        bothAnswered,
-      }
-    });
-  } catch (error) {
-    console.error("Get daily question error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to fetch daily question" });
-  }
-});
-
-router.post("/daily-question/answer", async (req, res) => {
-  try {
-    const userId = req.user.userId;
-    const { question_id, answer_text } = req.body;
-    if (!question_id || !answer_text) {
-      return res.status(400).json({ success: false, message: "question_id and answer_text are required" });
-    }
-
-    await pool.query(
-      `INSERT INTO daily_question_answers (question_id, user_id, answer_text)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (question_id, user_id) DO UPDATE SET answer_text = EXCLUDED.answer_text, answered_at = NOW()`,
-      [question_id, userId, answer_text]
-    );
-
-    const answersRes = await pool.query(
-      "SELECT user_id, answer_text FROM daily_question_answers WHERE question_id = $1",
-      [question_id]
-    );
-
-    const answers = answersRes.rows;
-    const bothAnswered = answers.length >= 2;
-
-    res.json({
-      success: true,
-      data: {
-        question_id,
-        myAnswer: answer_text,
-        bothAnswered,
-      }
-    });
-  } catch (error) {
-    console.error("Submit daily question answer error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to submit answer" });
-  }
-});
-
-// 3. PRIVATE MEMORIES
-router.get("/memories", async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT id, type, media_url, caption, memory_date, created_by, created_at FROM private_memories ORDER BY memory_date DESC"
-    );
     res.json({ success: true, data: result.rows });
   } catch (error) {
-    console.error("Get memories error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to fetch memories" });
+    console.error("Get scheduled messages error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to fetch scheduled messages" });
   }
 });
 
-router.post("/memories", upload.single("media"), async (req, res) => {
+// GET SPECIAL DATES (ANNIVERSARIES / COUNTDOWNS) FOR A CONVERSATION
+router.get("/special-dates/:conversationId", async (req, res) => {
   try {
-    const userId = req.user.userId;
-    const { caption, memory_date, type } = req.body;
-    
-    let mediaUrl = req.body.media_url || "";
-    if (req.file) {
-      mediaUrl = `/messages/media/${req.file.filename}`;
-    }
+    const { conversationId } = req.params;
+    const authUserId = req.user.id;
 
-    if (!mediaUrl) {
-      return res.status(400).json({ success: false, message: "Media file or media_url is required" });
+    const memberCheck = await pool.query(
+      "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+      [conversationId, authUserId]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ success: false, message: "Not authorized for this conversation" });
     }
 
     const result = await pool.query(
-      `INSERT INTO private_memories (type, media_url, caption, memory_date, created_by)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, type, media_url, caption, memory_date, created_by, created_at`,
-      [type || 'photo', mediaUrl, caption || null, memory_date || new Date(), userId]
+      `SELECT id, conversation_id, title, event_date, is_recurring_yearly, created_by, created_at
+       FROM special_dates
+       WHERE conversation_id = $1
+       ORDER BY event_date ASC`,
+      [conversationId]
     );
 
-    res.json({ success: true, data: result.rows[0] });
-  } catch (error) {
-    console.error("Create memory error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to create memory" });
-  }
-});
-
-router.delete("/memories/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    await pool.query("DELETE FROM private_memories WHERE id = $1", [id]);
-    res.json({ success: true, message: "Memory deleted successfully" });
-  } catch (error) {
-    console.error("Delete memory error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to delete memory" });
-  }
-});
-
-// 4. SHARED NOTES
-router.get("/notes", async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT id, title, content, created_by, created_at, updated_at FROM shared_notes ORDER BY updated_at DESC"
-    );
     res.json({ success: true, data: result.rows });
   } catch (error) {
-    console.error("Get notes error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to fetch notes" });
-  }
-});
-
-router.post("/notes", async (req, res) => {
-  try {
-    const userId = req.user.userId;
-    const { title, content } = req.body;
-    if (!title || !content) {
-      return res.status(400).json({ success: false, message: "Title and content are required" });
-    }
-
-    const result = await pool.query(
-      `INSERT INTO shared_notes (title, content, created_by)
-       VALUES ($1, $2, $3)
-       RETURNING id, title, content, created_by, created_at, updated_at`,
-      [title, content, userId]
-    );
-
-    res.json({ success: true, data: result.rows[0] });
-  } catch (error) {
-    console.error("Create note error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to create note" });
-  }
-});
-
-router.put("/notes/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { title, content } = req.body;
-
-    const result = await pool.query(
-      `UPDATE shared_notes
-       SET title = COALESCE($1, title),
-           content = COALESCE($2, content),
-           updated_at = NOW()
-       WHERE id = $3
-       RETURNING id, title, content, created_by, created_at, updated_at`,
-      [title, content, id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, message: "Note not found" });
-    }
-
-    res.json({ success: true, data: result.rows[0] });
-  } catch (error) {
-    console.error("Update note error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to update note" });
-  }
-});
-
-router.delete("/notes/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    await pool.query("DELETE FROM shared_notes WHERE id = $1", [id]);
-    res.json({ success: true, message: "Note deleted successfully" });
-  } catch (error) {
-    console.error("Delete note error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to delete note" });
-  }
-});
-
-// 5. COUPLE ROUTINES
-router.get("/routines", async (req, res) => {
-  try {
-    const userId = req.user.userId;
-    const result = await pool.query(
-      "SELECT user_id, morning_enabled, morning_time, night_enabled, night_time, custom_morning_msg, custom_night_msg, sound_enabled, updated_at FROM couple_routines WHERE user_id = $1",
-      [userId]
-    );
-    res.json({
-      success: true,
-      data: result.rows[0] || {
-        user_id: userId,
-        morning_enabled: false,
-        morning_time: "08:00",
-        night_enabled: false,
-        night_time: "22:00",
-        custom_morning_msg: null,
-        custom_night_msg: null,
-        sound_enabled: true,
-      }
-    });
-  } catch (error) {
-    console.error("Get routines error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to fetch routines" });
-  }
-});
-
-router.post("/routines", async (req, res) => {
-  try {
-    const userId = req.user.userId;
-    const { morning_enabled, morning_time, night_enabled, night_time, custom_morning_msg, custom_night_msg, sound_enabled } = req.body;
-
-    const result = await pool.query(
-      `INSERT INTO couple_routines (user_id, morning_enabled, morning_time, night_enabled, night_time, custom_morning_msg, custom_night_msg, sound_enabled, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-       ON CONFLICT (user_id) DO UPDATE SET
-         morning_enabled = EXCLUDED.morning_enabled,
-         morning_time = EXCLUDED.morning_time,
-         night_enabled = EXCLUDED.night_enabled,
-         night_time = EXCLUDED.night_time,
-         custom_morning_msg = EXCLUDED.custom_morning_msg,
-         custom_night_msg = EXCLUDED.custom_night_msg,
-         sound_enabled = EXCLUDED.sound_enabled,
-         updated_at = NOW()
-       RETURNING user_id, morning_enabled, morning_time, night_enabled, night_time, custom_morning_msg, custom_night_msg, sound_enabled, updated_at`,
-      [userId, morning_enabled ?? false, morning_time || "08:00", night_enabled ?? false, night_time || "22:00", custom_morning_msg || null, custom_night_msg || null, sound_enabled ?? true]
-    );
-
-    res.json({ success: true, data: result.rows[0] });
-  } catch (error) {
-    console.error("Save routines error:", error.message);
-    res.status(500).json({ success: false, message: "Failed to save routines" });
+    console.error("Get special dates error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to fetch special dates" });
   }
 });
 
