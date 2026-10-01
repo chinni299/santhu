@@ -102,14 +102,11 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
   Widget build(BuildContext context) {
     final bool isDark = Theme.of(context).brightness == Brightness.dark;
 
-    return GestureDetector(
+    return Listener(
       behavior: HitTestBehavior.opaque,
-      onTapDown: (_) => _onPressDown(),
-      onTapUp: (_) => _onPressUp(),
-      onTapCancel: () => _onPressUp(),
-      onLongPressStart: (_) => _onPressDown(),
-      onLongPressEnd: (_) => _onPressUp(),
-      onLongPressCancel: () => _onPressUp(),
+      onPointerDown: (_) => _onPressDown(),
+      onPointerUp: (_) => _onPressUp(),
+      onPointerCancel: (_) => _onPressUp(),
       child: ScaleTransition(
         scale: _scaleAnimation,
         child: AnimatedContainer(
