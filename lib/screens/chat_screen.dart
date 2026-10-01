@@ -31,6 +31,9 @@ import 'call_screen.dart';
 import 'media_gallery_screen.dart';
 import 'special_dates_screen.dart';
 import 'call_history_screen.dart';
+import '../features/heartbeat_share/heartbeat_button.dart';
+import '../features/heartbeat_share/heartbeat_overlay.dart';
+import '../features/heartbeat_share/heartbeat_service.dart';
 
 
 class ChatScreen extends StatefulWidget {
@@ -68,6 +71,9 @@ class _ChatScreenState extends State<ChatScreen> {
   // Online / Offline / Last Seen State
   bool isOtherUserOnline = false;
   String? otherUserLastSeenText;
+
+  // Heartbeat Share State
+  bool _isReceivingHeartbeat = false;
 
   // Emoji Picker State
   bool _showEmojiPicker = false;
@@ -1124,6 +1130,14 @@ class _ChatScreenState extends State<ChatScreen> {
       joinConversation();
     }
 
+    // Initialize Heartbeat Share Socket Listeners
+    HeartbeatService.listenToSocket(socket);
+    HeartbeatService.onStateChange = (isActive, senderId) {
+      if (mounted) {
+        setState(() => _isReceivingHeartbeat = isActive);
+      }
+    };
+
     socket?.onConnectError((err) {
       debugPrint('[CHAT SOCKET] CONNECT ERROR: $err');
       if (!_hasLoggedOffline) {
@@ -1815,6 +1829,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    HeartbeatService.cleanup(socket);
     _typingTimer?.cancel();
     _recordingTimer?.cancel();
     _liveLocationTimer?.cancel();
@@ -5623,6 +5638,11 @@ class _ChatScreenState extends State<ChatScreen> {
                           size: 22,
                         ),
                       ),
+                      HeartbeatButton(
+                        socket: socket,
+                        conversationId: widget.conversationId,
+                        isPartnerOnline: isOtherUserOnline,
+                      ),
                       const SizedBox(width: 2),
                       (messageController.text.trim().isEmpty && editingMessageId == null)
                           ? GestureDetector(
@@ -5744,6 +5764,12 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ),
                 ),
+              ),
+
+            // Realtime Heartbeat Overlay when receiving heartbeat from partner
+            if (_isReceivingHeartbeat)
+              const Positioned.fill(
+                child: HeartbeatOverlay(),
               ),
           ],
         ),
