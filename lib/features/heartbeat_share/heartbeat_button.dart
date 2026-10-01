@@ -47,6 +47,8 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
     if (_isHolding) return;
     _pressDownTime = DateTime.now().millisecondsSinceEpoch;
 
+    debugPrint('[HEARTBEAT BUTTON] Press down triggered. Socket connected: ${widget.socket?.connected}');
+
     final started = HeartbeatService.startSending(
       socket: widget.socket,
       conversationId: widget.conversationId,
@@ -63,6 +65,8 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
   void _onPressUp() {
     if (!_isHolding) return;
     final duration = DateTime.now().millisecondsSinceEpoch - _pressDownTime;
+
+    debugPrint('[HEARTBEAT BUTTON] Press up triggered (duration: ${duration}ms)');
 
     if (duration < 350) {
       // Short click / Tap -> send a 3-second heartbeat burst to partner!

@@ -1133,6 +1133,9 @@ class _ChatScreenState extends State<ChatScreen> {
     socket?.onConnect((_) {
       debugPrint('[CHAT SOCKET] CONNECTED socketId: ${socket?.id}');
       joinConversation();
+      if (mounted) {
+        setState(() {});
+      }
     });
 
     if (socket?.connected == true) {
@@ -1669,6 +1672,9 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
     socket?.connect(); // Single connect()
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   void _openCallScreen({required bool isVideoCall, required bool isCaller}) {
