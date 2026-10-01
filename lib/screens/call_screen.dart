@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
+import '../config/webrtc_config.dart';
 import '../theme/app_theme.dart';
 
 class CallScreen extends StatefulWidget {
@@ -41,11 +42,16 @@ class _CallScreenState extends State<CallScreen> {
   bool _isFrontCamera = true;
   bool _isSpeakerOn = true;
   bool _isCallConnected = false;
+  bool _hasRemoteDescription = false;
   String _callStatus = 'Connecting...';
+  String? _permissionError;
 
   // Call duration timer
   Timer? _callTimer;
   int _callDurationSeconds = 0;
+
+  // Realtime getStats logging timer (every 2 seconds)
+  Timer? _statsTimer;
 
   bool _iceRestartAttempted = false;
   final List<RTCIceCandidate> _pendingIceCandidates = [];
@@ -55,32 +61,70 @@ class _CallScreenState extends State<CallScreen> {
     super.initState();
     _callStatus = widget.isCaller ? 'Calling...' : 'Connecting call...';
     _isCameraOff = !widget.isVideoCall;
+    // Default speaker to true for video calls, true for audio call on mobile
+    _isSpeakerOn = true;
     _initCall();
   }
 
-  Future<void> _requestPermissions() async {
-    if (!kIsWeb) {
-      await [
-        Permission.camera,
+  Future<bool> _requestPermissions() async {
+    if (kIsWeb) return true;
+
+    try {
+      final permissionsToRequest = <Permission>[
         Permission.microphone,
-      ].request();
+      ];
+      if (widget.isVideoCall) {
+        permissionsToRequest.add(Permission.camera);
+      }
+      // Request Bluetooth Connect on Android 12+ if available
+      try {
+        permissionsToRequest.add(Permission.bluetoothConnect);
+      } catch (_) {}
+
+      final statuses = await permissionsToRequest.request();
+
+      final micGranted = statuses[Permission.microphone]?.isGranted == true;
+      final camGranted = !widget.isVideoCall || (statuses[Permission.camera]?.isGranted == true);
+
+      debugPrint("[WEBRTC PERMISSIONS] Mic granted: $micGranted, Camera granted: $camGranted");
+
+      if (!micGranted) {
+        setState(() {
+          _permissionError = 'Microphone permission is required for calls.';
+          _callStatus = 'Permission Denied';
+        });
+        return false;
+      }
+
+      if (widget.isVideoCall && !camGranted) {
+        setState(() {
+          _permissionError = 'Camera permission is required for video calls.';
+          _callStatus = 'Permission Denied';
+        });
+        return false;
+      }
+
+      return true;
+    } catch (e, stack) {
+      debugPrint("[WEBRTC PERMISSIONS ERROR] $e\n$stack");
+      return true; // continue attempt
     }
   }
 
   Future<void> _initCall() async {
     try {
-      await _requestPermissions();
+      final granted = await _requestPermissions();
+      if (!granted) {
+        debugPrint("[WEBRTC] Aborting call initialization due to missing permissions.");
+        return;
+      }
 
       await _localRenderer.initialize();
       await _remoteRenderer.initialize();
 
-      // Create Local Media Stream with robust fallback
+      // Constraints test: log exact parameters and test getUserMedia
       final mediaConstraints = <String, dynamic>{
-        'audio': {
-          'echoCancellation': true,
-          'noiseSuppression': true,
-          'autoGainControl': true,
-        },
+        'audio': true,
         'video': widget.isVideoCall
             ? {
                 'facingMode': 'user',
@@ -92,26 +136,27 @@ class _CallScreenState extends State<CallScreen> {
       };
 
       try {
+        debugPrint("[WEBRTC MEDIA] Invoking getUserMedia with constraints: $mediaConstraints");
         _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
-      } catch (e1) {
-        debugPrint("[CALL] Primary getUserMedia failed ($e1). Retrying fallback constraints...");
+        debugPrint("[WEBRTC MEDIA] getUserMedia SUCCESS. Audio tracks: ${_localStream?.getAudioTracks().length}, Video tracks: ${_localStream?.getVideoTracks().length}");
+      } catch (e, stack) {
+        debugPrint("[WEBRTC MEDIA ERROR] Exact getUserMedia Exception: ($e) [Type: ${e.runtimeType}]\n$stack");
         try {
+          debugPrint("[WEBRTC MEDIA] Attempting simple constraints fallback...");
           _localStream = await navigator.mediaDevices.getUserMedia({
             'audio': true,
-            'video': widget.isVideoCall ? true : false,
+            'video': widget.isVideoCall,
           });
-        } catch (e2) {
-          debugPrint("[CALL] Fallback to audio-only stream: $e2");
-          try {
-            _localStream = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': false});
-            _isCameraOff = true;
-          } catch (e3) {
-            debugPrint("[CALL] Camera/Mic unavailable ($e3)");
-            _isCameraOff = true;
-            _isMuted = true;
-            if (mounted) {
-              setState(() => _callStatus = 'Microphone/Camera unavailable');
-            }
+          debugPrint("[WEBRTC MEDIA] Fallback getUserMedia SUCCESS");
+        } catch (e2, stack2) {
+          debugPrint("[WEBRTC MEDIA ERROR] Fallback getUserMedia Exception: ($e2)\n$stack2");
+          _isMuted = true;
+          _isCameraOff = true;
+          if (mounted) {
+            setState(() {
+              _permissionError = 'Could not access microphone or camera.';
+              _callStatus = 'Media Device Error';
+            });
           }
         }
       }
@@ -120,50 +165,31 @@ class _CallScreenState extends State<CallScreen> {
         _localRenderer.srcObject = _localStream;
         for (var track in _localStream!.getAudioTracks()) {
           track.enabled = true;
+          debugPrint("[WEBRTC MEDIA] Enabled local audio track: ${track.id}");
+        }
+        for (var track in _localStream!.getVideoTracks()) {
+          track.enabled = !_isCameraOff;
+          debugPrint("[WEBRTC MEDIA] Enabled local video track: ${track.id}");
         }
       }
 
-      // WebRTC Peer Connection Configuration
-      final configuration = <String, dynamic>{
-        'iceServers': [
-          {
-            'urls': ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'],
-          },
-          {
-            'urls': 'stun:openrelay.metered.ca:80',
-          },
-          {
-            'urls': 'turn:openrelay.metered.ca:80',
-            'username': 'openrelayproject',
-            'credential': 'openrelayproject',
-          },
-          {
-            'urls': 'turn:openrelay.metered.ca:443',
-            'username': 'openrelayproject',
-            'credential': 'openrelayproject',
-          },
-          {
-            'urls': 'turn:openrelay.metered.ca:443?transport=tcp',
-            'username': 'openrelayproject',
-            'credential': 'openrelayproject',
-          },
-        ],
-        'iceTransportPolicy': 'all',
-        'sdpSemantics': 'unified-plan',
-      };
+      // Initialize WebRTC PeerConnection with STUN + TURN servers
+      final configuration = WebRtcConfig.peerConnectionConfiguration;
+      debugPrint("[WEBRTC ICE] Initializing PeerConnection with ${(configuration['iceServers'] as List).length} ICE servers");
 
       _peerConnection = await createPeerConnection(configuration);
 
-      // Add local stream tracks to Peer Connection
+      // Add local stream tracks to PeerConnection
       if (_localStream != null) {
         for (var track in _localStream!.getTracks()) {
-          await _peerConnection?.addTrack(track, _localStream!);
+          final sender = await _peerConnection?.addTrack(track, _localStream!);
+          debugPrint("[WEBRTC TRACK] Added local ${track.kind} track (id: ${track.id}) -> sender: ${sender?.track?.id}");
         }
       }
 
       // Handle Remote Stream Tracks (Unified Plan)
       _peerConnection?.onTrack = (RTCTrackEvent event) async {
-        debugPrint('[WebRTC] onTrack: kind=${event.track.kind}, id=${event.track.id}, streams=${event.streams.length}');
+        debugPrint('[WEBRTC TRACK] onTrack received: kind=${event.track.kind}, id=${event.track.id}, streams=${event.streams.length}');
         event.track.enabled = true;
 
         if (event.streams.isNotEmpty) {
@@ -173,7 +199,6 @@ class _CallScreenState extends State<CallScreen> {
           _remoteStream!.addTrack(event.track);
         }
 
-        // Enable all remote audio & video tracks
         for (var track in _remoteStream!.getAudioTracks()) {
           track.enabled = true;
         }
@@ -188,13 +213,14 @@ class _CallScreenState extends State<CallScreen> {
             _callStatus = 'Connected';
           });
           _startCallTimerIfNeeded();
-          _applySpeakerphone();
+          _startStatsLogging();
+          _applyAudioRouting();
         }
       };
 
-      // Handle Remote Stream (Plan-B / Legacy fallback)
+      // Handle Remote Stream (Plan-B fallback)
       _peerConnection?.onAddStream = (MediaStream stream) {
-        debugPrint('[WebRTC] onAddStream: id=${stream.id}');
+        debugPrint('[WEBRTC TRACK] onAddStream received: id=${stream.id}, audio=${stream.getAudioTracks().length}, video=${stream.getVideoTracks().length}');
         for (var track in stream.getAudioTracks()) {
           track.enabled = true;
         }
@@ -209,13 +235,15 @@ class _CallScreenState extends State<CallScreen> {
             _callStatus = 'Connected';
           });
           _startCallTimerIfNeeded();
-          _applySpeakerphone();
+          _startStatsLogging();
+          _applyAudioRouting();
         }
       };
 
-      // Handle ICE Candidates
+      // Handle ICE Candidates generated locally
       _peerConnection?.onIceCandidate = (RTCIceCandidate candidate) {
         if (candidate.candidate != null && candidate.candidate!.isNotEmpty) {
+          debugPrint("[WEBRTC ICE] Generated candidate: ${candidate.candidate?.substring(0, 30)}...");
           widget.socket?.emit('webrtcIceCandidate', {
             'conversationId': widget.conversationId,
             'candidate': candidate.toMap(),
@@ -224,8 +252,9 @@ class _CallScreenState extends State<CallScreen> {
         }
       };
 
+      // Handle ICE Connection State Changes
       _peerConnection?.onIceConnectionState = (RTCIceConnectionState state) {
-        debugPrint("[WebRTC] ICE Connection State: $state");
+        debugPrint("[WEBRTC ICE STATE] Connection state changed: $state");
         if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
             state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
           _iceRestartAttempted = false;
@@ -235,7 +264,8 @@ class _CallScreenState extends State<CallScreen> {
               _callStatus = 'Connected';
             });
             _startCallTimerIfNeeded();
-            _applySpeakerphone();
+            _startStatsLogging();
+            _applyAudioRouting();
           }
         } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
           if (mounted && _isCallConnected) {
@@ -249,6 +279,7 @@ class _CallScreenState extends State<CallScreen> {
       _setupSocketListeners();
 
       if (widget.isCaller) {
+        debugPrint("[WEBRTC] Emitting callUser as Caller (User ${widget.currentUserId})");
         widget.socket?.emit('callUser', {
           'conversationId': widget.conversationId,
           'isVideoCall': widget.isVideoCall,
@@ -256,35 +287,43 @@ class _CallScreenState extends State<CallScreen> {
           'senderId': widget.currentUserId,
         });
       } else {
+        debugPrint("[WEBRTC] Emitting acceptCall as Receiver (User ${widget.currentUserId})");
         widget.socket?.emit('acceptCall', {
           'conversationId': widget.conversationId,
           'userId': widget.currentUserId,
           'senderId': widget.currentUserId,
         });
       }
-    } catch (e) {
-      debugPrint("[WebRTC] Error initializing WebRTC: $e");
+    } catch (e, stack) {
+      debugPrint("[WEBRTC ERROR] Error in _initCall: $e\n$stack");
       if (mounted) {
-        setState(() => _callStatus = 'Failed to initialize call');
+        setState(() => _callStatus = 'Call Initialization Failed');
       }
     }
   }
 
-  void _applySpeakerphone() {
+  void _applyAudioRouting() {
     if (!kIsWeb) {
-      Helper.setSpeakerphoneOn(_isSpeakerOn);
+      try {
+        Helper.setSpeakerphoneOn(_isSpeakerOn);
+        debugPrint("[WEBRTC AUDIO] Speakerphone set to: $_isSpeakerOn");
+      } catch (e) {
+        debugPrint("[WEBRTC AUDIO ERROR] Setting speakerphone failed: $e");
+      }
     }
   }
 
   void _setupSocketListeners() {
     widget.socket?.on('callAccepted', (data) async {
+      debugPrint("[WEBRTC SIGNAL] callAccepted received by Caller");
       if (mounted && widget.isCaller) {
-        setState(() => _callStatus = 'Connecting...');
+        setState(() => _callStatus = 'Connecting media...');
         await _createOffer();
       }
     });
 
     widget.socket?.on('callRejected', (data) {
+      debugPrint("[WEBRTC SIGNAL] callRejected received");
       if (mounted) {
         setState(() => _callStatus = 'Call Declined');
         Future.delayed(const Duration(seconds: 1), _endCallLocal);
@@ -292,6 +331,7 @@ class _CallScreenState extends State<CallScreen> {
     });
 
     widget.socket?.on('callCancelled', (data) {
+      debugPrint("[WEBRTC SIGNAL] callCancelled received");
       if (mounted) {
         setState(() => _callStatus = 'Call Cancelled');
         Future.delayed(const Duration(seconds: 1), _endCallLocal);
@@ -299,6 +339,7 @@ class _CallScreenState extends State<CallScreen> {
     });
 
     widget.socket?.on('callMissed', (data) {
+      debugPrint("[WEBRTC SIGNAL] callMissed received");
       if (mounted) {
         setState(() => _callStatus = 'No Answer');
         Future.delayed(const Duration(seconds: 1), _endCallLocal);
@@ -306,12 +347,14 @@ class _CallScreenState extends State<CallScreen> {
     });
 
     widget.socket?.on('webrtcOffer', (data) async {
+      debugPrint("[WEBRTC SIGNAL] webrtcOffer received");
       if (mounted && !widget.isCaller && data != null && data['sdp'] != null) {
         await _handleOffer(Map<String, dynamic>.from(data['sdp']));
       }
     });
 
     widget.socket?.on('webrtcAnswer', (data) async {
+      debugPrint("[WEBRTC SIGNAL] webrtcAnswer received");
       if (mounted && widget.isCaller && data != null && data['sdp'] != null) {
         await _handleAnswer(Map<String, dynamic>.from(data['sdp']));
       }
@@ -326,18 +369,22 @@ class _CallScreenState extends State<CallScreen> {
           candidateData['sdpMLineIndex'],
         );
 
-        if (_peerConnection != null) {
-          final desc = await _peerConnection!.getRemoteDescription();
-          if (desc != null) {
+        if (_peerConnection != null && _hasRemoteDescription) {
+          try {
             await _peerConnection!.addCandidate(candidate);
-          } else {
-            _pendingIceCandidates.add(candidate);
+            debugPrint("[WEBRTC ICE] Added remote candidate directly");
+          } catch (e) {
+            debugPrint("[WEBRTC ICE ERROR] Failed to add candidate: $e");
           }
+        } else {
+          _pendingIceCandidates.add(candidate);
+          debugPrint("[WEBRTC ICE] Queued candidate (total pending: ${_pendingIceCandidates.length})");
         }
       }
     });
 
     widget.socket?.on('callEnded', (data) {
+      debugPrint("[WEBRTC SIGNAL] callEnded received");
       if (mounted) {
         setState(() => _callStatus = 'Call Ended');
         Future.delayed(const Duration(milliseconds: 500), _endCallLocal);
@@ -353,6 +400,7 @@ class _CallScreenState extends State<CallScreen> {
     _iceRestartAttempted = true;
 
     if (mounted) setState(() => _callStatus = 'Reconnecting...');
+    debugPrint("[WEBRTC ICE] Attempting ICE restart...");
 
     try {
       if (widget.isCaller) {
@@ -367,9 +415,10 @@ class _CallScreenState extends State<CallScreen> {
           'sdp': offer.toMap(),
           'senderId': widget.currentUserId,
         });
+        debugPrint("[WEBRTC ICE] ICE restart offer sent");
       }
     } catch (e) {
-      debugPrint("[WebRTC] Error attempting ICE restart: $e");
+      debugPrint("[WEBRTC ICE ERROR] ICE restart failed: $e");
     }
   }
 
@@ -387,9 +436,9 @@ class _CallScreenState extends State<CallScreen> {
         'sdp': offer.toMap(),
         'senderId': widget.currentUserId,
       });
-      debugPrint("[WebRTC] Offer sent with senderId ${widget.currentUserId}");
-    } catch (e) {
-      debugPrint("[WebRTC] Error creating WebRTC offer: $e");
+      debugPrint("[WEBRTC SIGNAL] Offer created and emitted by User ${widget.currentUserId}");
+    } catch (e, stack) {
+      debugPrint("[WEBRTC SIGNAL ERROR] Error creating offer: $e\n$stack");
     }
   }
 
@@ -398,9 +447,16 @@ class _CallScreenState extends State<CallScreen> {
       if (_peerConnection == null) return;
       final description = RTCSessionDescription(sdpMap['sdp'], sdpMap['type']);
       await _peerConnection!.setRemoteDescription(description);
+      _hasRemoteDescription = true;
+      debugPrint("[WEBRTC SIGNAL] Set remote description (offer) successfully");
 
+      // Flush all pending ICE candidates
       for (var cand in _pendingIceCandidates) {
-        await _peerConnection!.addCandidate(cand);
+        try {
+          await _peerConnection!.addCandidate(cand);
+        } catch (e) {
+          debugPrint("[WEBRTC ICE ERROR] Flushing candidate error: $e");
+        }
       }
       _pendingIceCandidates.clear();
 
@@ -415,7 +471,7 @@ class _CallScreenState extends State<CallScreen> {
         'sdp': answer.toMap(),
         'senderId': widget.currentUserId,
       });
-      debugPrint("[WebRTC] Answer sent with senderId ${widget.currentUserId}");
+      debugPrint("[WEBRTC SIGNAL] Answer created and emitted by User ${widget.currentUserId}");
 
       if (mounted) {
         setState(() {
@@ -423,10 +479,11 @@ class _CallScreenState extends State<CallScreen> {
           _callStatus = 'Connected';
         });
         _startCallTimerIfNeeded();
-        _applySpeakerphone();
+        _startStatsLogging();
+        _applyAudioRouting();
       }
-    } catch (e) {
-      debugPrint("[WebRTC] Error handling WebRTC offer: $e");
+    } catch (e, stack) {
+      debugPrint("[WEBRTC SIGNAL ERROR] Error handling offer: $e\n$stack");
     }
   }
 
@@ -435,9 +492,15 @@ class _CallScreenState extends State<CallScreen> {
       if (_peerConnection == null) return;
       final description = RTCSessionDescription(sdpMap['sdp'], sdpMap['type']);
       await _peerConnection!.setRemoteDescription(description);
+      _hasRemoteDescription = true;
+      debugPrint("[WEBRTC SIGNAL] Set remote description (answer) successfully");
 
       for (var cand in _pendingIceCandidates) {
-        await _peerConnection!.addCandidate(cand);
+        try {
+          await _peerConnection!.addCandidate(cand);
+        } catch (e) {
+          debugPrint("[WEBRTC ICE ERROR] Flushing candidate error: $e");
+        }
       }
       _pendingIceCandidates.clear();
 
@@ -447,10 +510,11 @@ class _CallScreenState extends State<CallScreen> {
           _callStatus = 'Connected';
         });
         _startCallTimerIfNeeded();
-        _applySpeakerphone();
+        _startStatsLogging();
+        _applyAudioRouting();
       }
-    } catch (e) {
-      debugPrint("[WebRTC] Error handling WebRTC answer: $e");
+    } catch (e, stack) {
+      debugPrint("[WEBRTC SIGNAL ERROR] Error handling answer: $e\n$stack");
     }
   }
 
@@ -459,6 +523,52 @@ class _CallScreenState extends State<CallScreen> {
     _callTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (mounted) {
         setState(() => _callDurationSeconds++);
+      }
+    });
+  }
+
+  // Realtime getStats logging every 2 seconds to measure live media throughput
+  void _startStatsLogging() {
+    if (_statsTimer != null) return;
+    _statsTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      if (_peerConnection == null || !_isCallConnected) return;
+      try {
+        final stats = await _peerConnection!.getStats();
+        num audioBytesSent = 0;
+        num audioBytesReceived = 0;
+        num videoBytesSent = 0;
+        num videoBytesReceived = 0;
+        num packetsLost = 0;
+        num framesDecoded = 0;
+        num framesSent = 0;
+
+        for (var report in stats) {
+          final values = report.values;
+          if (report.type == 'outbound-rtp') {
+            if (values['kind'] == 'audio' || values['mediaType'] == 'audio') {
+              audioBytesSent += (values['bytesSent'] as num? ?? 0);
+            } else if (values['kind'] == 'video' || values['mediaType'] == 'video') {
+              videoBytesSent += (values['bytesSent'] as num? ?? 0);
+              framesSent += (values['framesSent'] as num? ?? 0);
+            }
+          } else if (report.type == 'inbound-rtp') {
+            if (values['kind'] == 'audio' || values['mediaType'] == 'audio') {
+              audioBytesReceived += (values['bytesReceived'] as num? ?? 0);
+              packetsLost += (values['packetsLost'] as num? ?? 0);
+            } else if (values['kind'] == 'video' || values['mediaType'] == 'video') {
+              videoBytesReceived += (values['bytesReceived'] as num? ?? 0);
+              framesDecoded += (values['framesDecoded'] as num? ?? 0);
+            }
+          }
+        }
+
+        debugPrint(
+          '[WEBRTC STATS @ ${_callDurationSeconds}s] User: ${widget.currentUserId} | '
+          'Audio: Sent=${audioBytesSent}B, Recv=${audioBytesReceived}B, Lost=$packetsLost | '
+          'Video: Sent=${videoBytesSent}B, Recv=${videoBytesReceived}B, FramesDecoded=$framesDecoded, FramesSent=$framesSent',
+        );
+      } catch (e) {
+        debugPrint("[WEBRTC STATS ERROR] Error getting stats: $e");
       }
     });
   }
@@ -476,6 +586,7 @@ class _CallScreenState extends State<CallScreen> {
         _isMuted = !_isMuted;
         track.enabled = !_isMuted;
       });
+      debugPrint("[WEBRTC] Toggled microphone: isMuted=$_isMuted");
     }
   }
 
@@ -486,6 +597,7 @@ class _CallScreenState extends State<CallScreen> {
         _isCameraOff = !_isCameraOff;
         track.enabled = !_isCameraOff;
       });
+      debugPrint("[WEBRTC] Toggled camera: isCameraOff=$_isCameraOff");
     }
   }
 
@@ -496,6 +608,7 @@ class _CallScreenState extends State<CallScreen> {
       setState(() {
         _isFrontCamera = !_isFrontCamera;
       });
+      debugPrint("[WEBRTC] Switched camera: isFront=$_isFrontCamera");
     }
   }
 
@@ -503,7 +616,7 @@ class _CallScreenState extends State<CallScreen> {
     setState(() {
       _isSpeakerOn = !_isSpeakerOn;
     });
-    _applySpeakerphone();
+    _applyAudioRouting();
   }
 
   void _endCall() {
@@ -516,22 +629,37 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   void _endCallLocal() {
+    debugPrint("[WEBRTC] Cleaning up and ending call...");
     _callTimer?.cancel();
     _callTimer = null;
 
-    _localStream?.getTracks().forEach((track) => track.stop());
+    _statsTimer?.cancel();
+    _statsTimer = null;
+
+    _localStream?.getTracks().forEach((track) {
+      track.stop();
+    });
     _localStream?.dispose();
     _localStream = null;
 
-    _remoteStream?.getTracks().forEach((track) => track.stop());
+    _remoteStream?.getTracks().forEach((track) {
+      track.stop();
+    });
     _remoteStream?.dispose();
     _remoteStream = null;
 
     _peerConnection?.close();
     _peerConnection?.dispose();
+    _peerConnection = null;
 
     _localRenderer.dispose();
     _remoteRenderer.dispose();
+
+    if (!kIsWeb) {
+      try {
+        Helper.setSpeakerphoneOn(false);
+      } catch (_) {}
+    }
 
     if (mounted) {
       Navigator.of(context).pop();
@@ -541,6 +669,7 @@ class _CallScreenState extends State<CallScreen> {
   @override
   void dispose() {
     _callTimer?.cancel();
+    _statsTimer?.cancel();
     widget.socket?.off('callAccepted');
     widget.socket?.off('callRejected');
     widget.socket?.off('callCancelled');
@@ -554,6 +683,39 @@ class _CallScreenState extends State<CallScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_permissionError != null) {
+      return Scaffold(
+        backgroundColor: const Color(0xFF111B21),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.lock_rounded, size: 64, color: Colors.redAccent),
+                const SizedBox(height: 20),
+                Text(
+                  _permissionError!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 24),
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(context),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppTheme.primaryTeal,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                  ),
+                  child: const Text('Go Back'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
