@@ -34,6 +34,7 @@ class _CallScreenState extends State<CallScreen> {
 
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
+  MediaStream? _remoteStream;
 
   bool _isMuted = false;
   bool _isCameraOff = false;
@@ -42,13 +43,11 @@ class _CallScreenState extends State<CallScreen> {
   bool _isCallConnected = false;
   String _callStatus = 'Connecting...';
 
-  // ---- NEW: Call duration timer state ----
+  // Call duration timer
   Timer? _callTimer;
   int _callDurationSeconds = 0;
 
-  // ---- NEW: Auto ICE-restart-on-failure state ----
   bool _iceRestartAttempted = false;
-
   final List<RTCIceCandidate> _pendingIceCandidates = [];
 
   @override
@@ -75,14 +74,19 @@ class _CallScreenState extends State<CallScreen> {
       await _localRenderer.initialize();
       await _remoteRenderer.initialize();
 
-      // Create Local Media Stream with robust fallback strategy
+      // Create Local Media Stream with robust fallback
       final mediaConstraints = <String, dynamic>{
-        'audio': true,
+        'audio': {
+          'echoCancellation': true,
+          'noiseSuppression': true,
+          'autoGainControl': true,
+        },
         'video': widget.isVideoCall
             ? {
                 'facingMode': 'user',
                 'width': {'ideal': 640},
                 'height': {'ideal': 480},
+                'frameRate': {'ideal': 30},
               }
             : false,
       };
@@ -90,26 +94,23 @@ class _CallScreenState extends State<CallScreen> {
       try {
         _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
       } catch (e1) {
-        debugPrint("Primary getUserMedia failed ($e1). Trying simple constraints...");
+        debugPrint("[CALL] Primary getUserMedia failed ($e1). Retrying fallback constraints...");
         try {
-          final simpleConstraints = <String, dynamic>{
+          _localStream = await navigator.mediaDevices.getUserMedia({
             'audio': true,
             'video': widget.isVideoCall ? true : false,
-          };
-          _localStream = await navigator.mediaDevices.getUserMedia(simpleConstraints);
+          });
         } catch (e2) {
-          debugPrint("Simple video getUserMedia failed ($e2). Fallback to audio-only stream...");
+          debugPrint("[CALL] Fallback to audio-only stream: $e2");
           try {
             _localStream = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': false});
             _isCameraOff = true;
           } catch (e3) {
-            debugPrint("Camera/Mic in use by another window ($e3). Continuing call in receive mode...");
+            debugPrint("[CALL] Camera/Mic unavailable ($e3)");
             _isCameraOff = true;
             _isMuted = true;
             if (mounted) {
-              setState(() {
-                _callStatus = 'Camera in use by another tab';
-              });
+              setState(() => _callStatus = 'Microphone/Camera unavailable');
             }
           }
         }
@@ -117,21 +118,16 @@ class _CallScreenState extends State<CallScreen> {
 
       if (_localStream != null) {
         _localRenderer.srcObject = _localStream;
+        for (var track in _localStream!.getAudioTracks()) {
+          track.enabled = true;
+        }
       }
 
-      // Setup WebRTC Peer Connection
-      // STUN alone only works when both peers are on "open" networks. Many
-      // real-world networks (mobile data, office/college WiFi, symmetric
-      // NAT) block the direct peer-to-peer path entirely, so a TURN relay
-      // is required as a fallback — without one, calls silently fail to
-      // connect for a large fraction of real users.
-      // Using Open Relay Project's free, public TURN servers here (no
-      // signup, no cost). For heavier production use, swap these for your
-      // own Metered.ca dashboard credentials or a self-hosted coturn.
+      // WebRTC Peer Connection Configuration
       final configuration = <String, dynamic>{
         'iceServers': [
           {
-            'urls': ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'],
+            'urls': ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'],
           },
           {
             'urls': 'stun:openrelay.metered.ca:80',
@@ -152,61 +148,100 @@ class _CallScreenState extends State<CallScreen> {
             'credential': 'openrelayproject',
           },
         ],
-        // Prefer relay only as a last resort — try direct/STUN paths first,
-        // fall back to TURN relay automatically when they fail.
         'iceTransportPolicy': 'all',
+        'sdpSemantics': 'unified-plan',
       };
 
       _peerConnection = await createPeerConnection(configuration);
 
       // Add local stream tracks to Peer Connection
-      _localStream?.getTracks().forEach((track) {
-        _peerConnection?.addTrack(track, _localStream!);
-      });
+      if (_localStream != null) {
+        for (var track in _localStream!.getTracks()) {
+          await _peerConnection?.addTrack(track, _localStream!);
+        }
+      }
 
-      // Handle Remote Stream Track
-      _peerConnection?.onTrack = (RTCTrackEvent event) {
+      // Handle Remote Stream Tracks (Unified Plan)
+      _peerConnection?.onTrack = (RTCTrackEvent event) async {
+        debugPrint('[WebRTC] onTrack: kind=${event.track.kind}, id=${event.track.id}, streams=${event.streams.length}');
+        event.track.enabled = true;
+
         if (event.streams.isNotEmpty) {
+          _remoteStream = event.streams[0];
+        } else {
+          _remoteStream ??= await createLocalMediaStream('remote_stream_${DateTime.now().millisecondsSinceEpoch}');
+          _remoteStream!.addTrack(event.track);
+        }
+
+        // Enable all remote audio & video tracks
+        for (var track in _remoteStream!.getAudioTracks()) {
+          track.enabled = true;
+        }
+        for (var track in _remoteStream!.getVideoTracks()) {
+          track.enabled = true;
+        }
+
+        if (mounted) {
           setState(() {
-            _remoteRenderer.srcObject = event.streams[0];
+            _remoteRenderer.srcObject = _remoteStream;
             _isCallConnected = true;
             _callStatus = 'Connected';
           });
-          _startCallTimerIfNeeded(); // NEW
+          _startCallTimerIfNeeded();
+          _applySpeakerphone();
+        }
+      };
+
+      // Handle Remote Stream (Plan-B / Legacy fallback)
+      _peerConnection?.onAddStream = (MediaStream stream) {
+        debugPrint('[WebRTC] onAddStream: id=${stream.id}');
+        for (var track in stream.getAudioTracks()) {
+          track.enabled = true;
+        }
+        for (var track in stream.getVideoTracks()) {
+          track.enabled = true;
+        }
+        _remoteStream = stream;
+        if (mounted) {
+          setState(() {
+            _remoteRenderer.srcObject = _remoteStream;
+            _isCallConnected = true;
+            _callStatus = 'Connected';
+          });
+          _startCallTimerIfNeeded();
+          _applySpeakerphone();
         }
       };
 
       // Handle ICE Candidates
       _peerConnection?.onIceCandidate = (RTCIceCandidate candidate) {
-        if (candidate.candidate != null) {
+        if (candidate.candidate != null && candidate.candidate!.isNotEmpty) {
           widget.socket?.emit('webrtcIceCandidate', {
             'conversationId': widget.conversationId,
             'candidate': candidate.toMap(),
+            'senderId': widget.currentUserId,
           });
         }
       };
 
       _peerConnection?.onIceConnectionState = (RTCIceConnectionState state) {
-        debugPrint("WebRTC ICE State: $state");
-        if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
-          _iceRestartAttempted = false; // reset once a good connection is (re)established
-          setState(() {
-            _isCallConnected = true;
-            _callStatus = 'Connected';
-          });
-          _startCallTimerIfNeeded(); // NEW
-        } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-          // A brief network hiccup — WebRTC often recovers this on its own
-          // within a few seconds without any action needed.
-          if (mounted && _isCallConnected) {
+        debugPrint("[WebRTC] ICE Connection State: $state");
+        if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+            state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+          _iceRestartAttempted = false;
+          if (mounted) {
             setState(() {
-              _callStatus = 'Reconnecting...';
+              _isCallConnected = true;
+              _callStatus = 'Connected';
             });
+            _startCallTimerIfNeeded();
+            _applySpeakerphone();
+          }
+        } else if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+          if (mounted && _isCallConnected) {
+            setState(() => _callStatus = 'Reconnecting...');
           }
         } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-          // The path genuinely failed (e.g. NAT/firewall change mid-call).
-          // Try one automatic ICE restart before giving up — this re-runs
-          // negotiation and often recovers the call transparently.
           _attemptIceRestart();
         }
       };
@@ -214,80 +249,77 @@ class _CallScreenState extends State<CallScreen> {
       _setupSocketListeners();
 
       if (widget.isCaller) {
-        // Emit callUser signal
         widget.socket?.emit('callUser', {
           'conversationId': widget.conversationId,
           'isVideoCall': widget.isVideoCall,
+          'callerId': widget.currentUserId,
+          'senderId': widget.currentUserId,
         });
       } else {
-        // Callee accepts immediately
         widget.socket?.emit('acceptCall', {
           'conversationId': widget.conversationId,
+          'userId': widget.currentUserId,
+          'senderId': widget.currentUserId,
         });
       }
     } catch (e) {
-      debugPrint("Error initializing WebRTC: $e");
+      debugPrint("[WebRTC] Error initializing WebRTC: $e");
       if (mounted) {
-        setState(() {
-          _callStatus = 'Failed to access camera/mic';
-        });
+        setState(() => _callStatus = 'Failed to initialize call');
       }
+    }
+  }
+
+  void _applySpeakerphone() {
+    if (!kIsWeb) {
+      Helper.setSpeakerphoneOn(_isSpeakerOn);
     }
   }
 
   void _setupSocketListeners() {
     widget.socket?.on('callAccepted', (data) async {
       if (mounted && widget.isCaller) {
-        setState(() {
-          _callStatus = 'Ringing...';
-        });
+        setState(() => _callStatus = 'Connecting...');
         await _createOffer();
       }
     });
 
     widget.socket?.on('callRejected', (data) {
       if (mounted) {
-        setState(() {
-          _callStatus = 'Call Declined';
-        });
+        setState(() => _callStatus = 'Call Declined');
         Future.delayed(const Duration(seconds: 1), _endCallLocal);
       }
     });
 
     widget.socket?.on('callCancelled', (data) {
       if (mounted) {
-        setState(() {
-          _callStatus = 'Call Cancelled';
-        });
+        setState(() => _callStatus = 'Call Cancelled');
         Future.delayed(const Duration(seconds: 1), _endCallLocal);
       }
     });
 
-    // ---- NEW: Missed call (ring timeout on server side) ----
     widget.socket?.on('callMissed', (data) {
       if (mounted) {
-        setState(() {
-          _callStatus = 'No Answer';
-        });
+        setState(() => _callStatus = 'No Answer');
         Future.delayed(const Duration(seconds: 1), _endCallLocal);
       }
     });
 
     widget.socket?.on('webrtcOffer', (data) async {
       if (mounted && !widget.isCaller && data != null && data['sdp'] != null) {
-        await _handleOffer(data['sdp']);
+        await _handleOffer(Map<String, dynamic>.from(data['sdp']));
       }
     });
 
     widget.socket?.on('webrtcAnswer', (data) async {
       if (mounted && widget.isCaller && data != null && data['sdp'] != null) {
-        await _handleAnswer(data['sdp']);
+        await _handleAnswer(Map<String, dynamic>.from(data['sdp']));
       }
     });
 
     widget.socket?.on('webrtcIceCandidate', (data) async {
       if (mounted && data != null && data['candidate'] != null) {
-        final candidateData = data['candidate'];
+        final candidateData = Map<String, dynamic>.from(data['candidate']);
         final candidate = RTCIceCandidate(
           candidateData['candidate'],
           candidateData['sdpMid'],
@@ -307,73 +339,57 @@ class _CallScreenState extends State<CallScreen> {
 
     widget.socket?.on('callEnded', (data) {
       if (mounted) {
-        setState(() {
-          _callStatus = 'Call Ended';
-        });
+        setState(() => _callStatus = 'Call Ended');
         Future.delayed(const Duration(milliseconds: 500), _endCallLocal);
       }
     });
   }
 
-  // ---- NEW: One automatic ICE restart attempt on connection failure ----
-  // Only the caller side initiates the restart offer, to avoid both sides
-  // racing to renegotiate at once. Only ever attempted once per call to
-  // avoid endless retry loops on a genuinely dead connection.
   Future<void> _attemptIceRestart() async {
     if (_iceRestartAttempted || _peerConnection == null) {
-      if (mounted) {
-        setState(() {
-          _callStatus = 'Connection error';
-        });
-      }
+      if (mounted) setState(() => _callStatus = 'Connection error');
       return;
     }
     _iceRestartAttempted = true;
 
-    if (mounted) {
-      setState(() {
-        _callStatus = 'Reconnecting...';
-      });
-    }
+    if (mounted) setState(() => _callStatus = 'Reconnecting...');
 
     try {
       if (widget.isCaller) {
         final offer = await _peerConnection!.createOffer({
-          'offerToReceiveVideo': widget.isVideoCall ? 1 : 0,
-          'offerToReceiveAudio': 1,
+          'offerToReceiveVideo': widget.isVideoCall,
+          'offerToReceiveAudio': true,
           'iceRestart': true,
         });
         await _peerConnection!.setLocalDescription(offer);
         widget.socket?.emit('webrtcOffer', {
           'conversationId': widget.conversationId,
           'sdp': offer.toMap(),
+          'senderId': widget.currentUserId,
         });
-        debugPrint("ICE restart offer sent");
       }
-      // The callee side simply waits for the caller's restart offer and
-      // handles it through the existing _handleOffer/_handleAnswer flow.
     } catch (e) {
-      debugPrint("Error attempting ICE restart: $e");
-      if (mounted) {
-        setState(() {
-          _callStatus = 'Connection error';
-        });
-      }
+      debugPrint("[WebRTC] Error attempting ICE restart: $e");
     }
   }
 
   Future<void> _createOffer() async {
     try {
       if (_peerConnection == null) return;
-      final offer = await _peerConnection!.createOffer({'offerToReceiveVideo': widget.isVideoCall ? 1 : 0, 'offerToReceiveAudio': 1});
+      final offer = await _peerConnection!.createOffer({
+        'offerToReceiveVideo': widget.isVideoCall,
+        'offerToReceiveAudio': true,
+      });
       await _peerConnection!.setLocalDescription(offer);
 
       widget.socket?.emit('webrtcOffer', {
         'conversationId': widget.conversationId,
         'sdp': offer.toMap(),
+        'senderId': widget.currentUserId,
       });
+      debugPrint("[WebRTC] Offer sent with senderId ${widget.currentUserId}");
     } catch (e) {
-      debugPrint("Error creating WebRTC offer: $e");
+      debugPrint("[WebRTC] Error creating WebRTC offer: $e");
     }
   }
 
@@ -383,27 +399,34 @@ class _CallScreenState extends State<CallScreen> {
       final description = RTCSessionDescription(sdpMap['sdp'], sdpMap['type']);
       await _peerConnection!.setRemoteDescription(description);
 
-      // Add any pending ICE candidates
       for (var cand in _pendingIceCandidates) {
         await _peerConnection!.addCandidate(cand);
       }
       _pendingIceCandidates.clear();
 
-      final answer = await _peerConnection!.createAnswer({'offerToReceiveVideo': widget.isVideoCall ? 1 : 0, 'offerToReceiveAudio': 1});
+      final answer = await _peerConnection!.createAnswer({
+        'offerToReceiveVideo': widget.isVideoCall,
+        'offerToReceiveAudio': true,
+      });
       await _peerConnection!.setLocalDescription(answer);
 
       widget.socket?.emit('webrtcAnswer', {
         'conversationId': widget.conversationId,
         'sdp': answer.toMap(),
+        'senderId': widget.currentUserId,
       });
+      debugPrint("[WebRTC] Answer sent with senderId ${widget.currentUserId}");
 
-      setState(() {
-        _isCallConnected = true;
-        _callStatus = 'Connected';
-      });
-      _startCallTimerIfNeeded(); // NEW
+      if (mounted) {
+        setState(() {
+          _isCallConnected = true;
+          _callStatus = 'Connected';
+        });
+        _startCallTimerIfNeeded();
+        _applySpeakerphone();
+      }
     } catch (e) {
-      debugPrint("Error handling WebRTC offer: $e");
+      debugPrint("[WebRTC] Error handling WebRTC offer: $e");
     }
   }
 
@@ -418,17 +441,19 @@ class _CallScreenState extends State<CallScreen> {
       }
       _pendingIceCandidates.clear();
 
-      setState(() {
-        _isCallConnected = true;
-        _callStatus = 'Connected';
-      });
-      _startCallTimerIfNeeded(); // NEW
+      if (mounted) {
+        setState(() {
+          _isCallConnected = true;
+          _callStatus = 'Connected';
+        });
+        _startCallTimerIfNeeded();
+        _applySpeakerphone();
+      }
     } catch (e) {
-      debugPrint("Error handling WebRTC answer: $e");
+      debugPrint("[WebRTC] Error handling WebRTC answer: $e");
     }
   }
 
-  // ---- NEW: Call duration timer helpers ----
   void _startCallTimerIfNeeded() {
     if (_callTimer != null) return;
     _callTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -464,10 +489,10 @@ class _CallScreenState extends State<CallScreen> {
     }
   }
 
-  Future<void> _switchCamera() async {
+  void _switchCamera() async {
     if (_localStream != null && _localStream!.getVideoTracks().isNotEmpty) {
-      final videoTrack = _localStream!.getVideoTracks().first;
-      await Helper.switchCamera(videoTrack);
+      final track = _localStream!.getVideoTracks().first;
+      await Helper.switchCamera(track);
       setState(() {
         _isFrontCamera = !_isFrontCamera;
       });
@@ -475,28 +500,33 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   void _toggleSpeaker() {
-    if (_localStream != null && _localStream!.getAudioTracks().isNotEmpty) {
-      final track = _localStream!.getAudioTracks().first;
-      setState(() {
-        _isSpeakerOn = !_isSpeakerOn;
-        track.enableSpeakerphone(_isSpeakerOn);
-      });
-    }
+    setState(() {
+      _isSpeakerOn = !_isSpeakerOn;
+    });
+    _applySpeakerphone();
   }
 
   void _endCall() {
-    if (widget.isCaller && !_isCallConnected) {
-      widget.socket?.emit('cancelCall', {'conversationId': widget.conversationId});
-    } else {
-      widget.socket?.emit('endCall', {'conversationId': widget.conversationId});
-    }
+    widget.socket?.emit('endCall', {
+      'conversationId': widget.conversationId,
+      'duration': _callDurationSeconds,
+      'senderId': widget.currentUserId,
+    });
     _endCallLocal();
   }
 
   void _endCallLocal() {
-    _callTimer?.cancel(); // NEW: stop timer on call end
+    _callTimer?.cancel();
+    _callTimer = null;
+
     _localStream?.getTracks().forEach((track) => track.stop());
     _localStream?.dispose();
+    _localStream = null;
+
+    _remoteStream?.getTracks().forEach((track) => track.stop());
+    _remoteStream?.dispose();
+    _remoteStream = null;
+
     _peerConnection?.close();
     _peerConnection?.dispose();
 
@@ -510,11 +540,11 @@ class _CallScreenState extends State<CallScreen> {
 
   @override
   void dispose() {
-    _callTimer?.cancel(); // NEW: safety cancel
+    _callTimer?.cancel();
     widget.socket?.off('callAccepted');
     widget.socket?.off('callRejected');
     widget.socket?.off('callCancelled');
-    widget.socket?.off('callMissed'); // NEW
+    widget.socket?.off('callMissed');
     widget.socket?.off('webrtcOffer');
     widget.socket?.off('webrtcAnswer');
     widget.socket?.off('webrtcIceCandidate');
@@ -529,9 +559,9 @@ class _CallScreenState extends State<CallScreen> {
       body: SafeArea(
         child: Stack(
           children: [
-            // Remote Video or Avatar
+            // Remote Video View or Avatar Placeholder
             Positioned.fill(
-              child: (widget.isVideoCall && _isCallConnected && _remoteRenderer.srcObject != null)
+              child: (widget.isVideoCall && _remoteRenderer.srcObject != null)
                   ? RTCVideoView(
                       _remoteRenderer,
                       objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
@@ -563,7 +593,6 @@ class _CallScreenState extends State<CallScreen> {
                             ),
                           ),
                           const SizedBox(height: 8),
-                          // ---- UPDATED: show live duration once connected ----
                           Text(
                             _isCallConnected ? _formatDuration(_callDurationSeconds) : _callStatus,
                             style: TextStyle(
@@ -571,24 +600,6 @@ class _CallScreenState extends State<CallScreen> {
                               color: Colors.white.withValues(alpha: 0.7),
                             ),
                           ),
-                          if (_callStatus.contains('Failed') || _callStatus.contains('permission') || _callStatus.contains('blocked')) ...[
-                            const SizedBox(height: 14),
-                            ElevatedButton.icon(
-                              onPressed: () {
-                                setState(() {
-                                  _callStatus = 'Retrying camera/mic access...';
-                                });
-                                _initCall();
-                              },
-                              icon: const Icon(Icons.refresh_rounded, size: 18),
-                              label: const Text('Retry Camera/Mic Access'),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: AppTheme.primaryTeal,
-                                foregroundColor: Colors.white,
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                              ),
-                            ),
-                          ],
                         ],
                       ),
                     ),
@@ -617,7 +628,7 @@ class _CallScreenState extends State<CallScreen> {
                 ),
               ),
 
-            // Status Bar Overlay Header
+            // Header bar
             Positioned(
               top: 20,
               left: 20,
@@ -641,7 +652,7 @@ class _CallScreenState extends State<CallScreen> {
               ),
             ),
 
-            // In-Call Action Control Bar
+            // Controls Bar
             Positioned(
               bottom: 40,
               left: 20,
@@ -649,9 +660,9 @@ class _CallScreenState extends State<CallScreen> {
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.6),
+                  color: Colors.black.withValues(alpha: 0.65),
                   borderRadius: BorderRadius.circular(36),
-                  border: Border.all(color: Colors.white10),
+                  border: Border.all(color: Colors.white12),
                 ),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,

@@ -1599,21 +1599,19 @@ io.on("connection", (socket) => {
   socket.on("webrtcOffer", async (data) => {
     try {
       const { conversationId, sdp } = data || {};
-      const senderId = socket.user?.userId || socket.data?.userId;
-      if (!conversationId || !senderId || !sdp) return;
+      const senderId = Number(data?.senderId || data?.userId || socket.user?.userId || socket.data?.userId || 1);
+      if (!conversationId || !sdp) return;
 
-      const memberCheck = await pool.query(
-        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
-        [conversationId, senderId]
-      );
-      if (memberCheck.rows.length === 0) return;
-
-      const recipientId = Number(senderId) === 1 ? 2 : 1;
-      io.to(`user_${recipientId}`).emit("webrtcOffer", {
+      const recipientId = senderId === 1 ? 2 : 1;
+      const payload = {
         conversationId: Number(conversationId),
         sdp,
         senderId: Number(senderId),
-      });
+      };
+
+      io.to(`user_${recipientId}`).emit("webrtcOffer", payload);
+      socket.to(String(conversationId)).emit("webrtcOffer", payload);
+      console.log(`[WEBRTC] Relayed offer from User ${senderId} to User ${recipientId} in conv ${conversationId}`);
     } catch (err) {
       console.error("Error in webrtcOffer:", err.message);
     }
@@ -1622,21 +1620,19 @@ io.on("connection", (socket) => {
   socket.on("webrtcAnswer", async (data) => {
     try {
       const { conversationId, sdp } = data || {};
-      const senderId = socket.user?.userId || socket.data?.userId;
-      if (!conversationId || !senderId || !sdp) return;
+      const senderId = Number(data?.senderId || data?.userId || socket.user?.userId || socket.data?.userId || 1);
+      if (!conversationId || !sdp) return;
 
-      const memberCheck = await pool.query(
-        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
-        [conversationId, senderId]
-      );
-      if (memberCheck.rows.length === 0) return;
-
-      const recipientId = Number(senderId) === 1 ? 2 : 1;
-      io.to(`user_${recipientId}`).emit("webrtcAnswer", {
+      const recipientId = senderId === 1 ? 2 : 1;
+      const payload = {
         conversationId: Number(conversationId),
         sdp,
         senderId: Number(senderId),
-      });
+      };
+
+      io.to(`user_${recipientId}`).emit("webrtcAnswer", payload);
+      socket.to(String(conversationId)).emit("webrtcAnswer", payload);
+      console.log(`[WEBRTC] Relayed answer from User ${senderId} to User ${recipientId} in conv ${conversationId}`);
     } catch (err) {
       console.error("Error in webrtcAnswer:", err.message);
     }
@@ -1645,21 +1641,18 @@ io.on("connection", (socket) => {
   socket.on("webrtcIceCandidate", async (data) => {
     try {
       const { conversationId, candidate } = data || {};
-      const senderId = socket.user?.userId || socket.data?.userId;
-      if (!conversationId || !senderId || !candidate) return;
+      const senderId = Number(data?.senderId || data?.userId || socket.user?.userId || socket.data?.userId || 1);
+      if (!conversationId || !candidate) return;
 
-      const memberCheck = await pool.query(
-        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
-        [conversationId, senderId]
-      );
-      if (memberCheck.rows.length === 0) return;
-
-      const recipientId = Number(senderId) === 1 ? 2 : 1;
-      io.to(`user_${recipientId}`).emit("webrtcIceCandidate", {
+      const recipientId = senderId === 1 ? 2 : 1;
+      const payload = {
         conversationId: Number(conversationId),
         candidate,
         senderId: Number(senderId),
-      });
+      };
+
+      io.to(`user_${recipientId}`).emit("webrtcIceCandidate", payload);
+      socket.to(String(conversationId)).emit("webrtcIceCandidate", payload);
     } catch (err) {
       console.error("Error in webrtcIceCandidate:", err.message);
     }
