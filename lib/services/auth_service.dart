@@ -241,7 +241,7 @@ class AuthService {
   // Register local X25519 Public Key with backend
   static Future<void> registerPublicKey([int? userId]) async {
     try {
-      final publicKeyB64 = await EncryptionService().getPublicKey();
+      final publicKeyB64 = await EncryptionService().getPublicKey(userId ?? 1);
       final headers = userId != null ? await getAuthHeadersForUser(userId) : await getAuthHeaders();
       final url = Uri.parse('${ApiConfig.baseUrl}/auth/public-key');
       await http.post(
@@ -249,17 +249,19 @@ class AuthService {
         headers: headers,
         body: jsonEncode({'publicKey': publicKeyB64}),
       );
-      debugPrint("X25519 public key registered with backend 🔑");
+      debugPrint("X25519 public key registered with backend for user ${userId ?? 1} 🔑");
     } catch (e) {
       debugPrint("Error registering public key: $e");
     }
   }
 
   // Fetch target user's X25519 Public Key from backend
-  static Future<String?> fetchPublicKey(int userId) async {
+  static Future<String?> fetchPublicKey(int targetUserId, [int? currentUserId]) async {
     try {
-      final headers = await getAuthHeaders();
-      final url = Uri.parse('${ApiConfig.baseUrl}/auth/public-key/$userId');
+      final headers = currentUserId != null
+          ? await getAuthHeadersForUser(currentUserId)
+          : await getAuthHeaders();
+      final url = Uri.parse('${ApiConfig.baseUrl}/auth/public-key/$targetUserId');
       final response = await http.get(url, headers: headers);
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -268,13 +270,13 @@ class AuthService {
         }
       }
     } catch (e) {
-      debugPrint("Error fetching public key for user $userId: $e");
+      debugPrint("Error fetching public key for user $targetUserId: $e");
     }
     return null;
   }
 
-  static Future<String?> getPeerPublicKey(int userId) async {
-    return await fetchPublicKey(userId);
+  static Future<String?> getPeerPublicKey(int targetUserId, [int? currentUserId]) async {
+    return await fetchPublicKey(targetUserId, currentUserId);
   }
 
   // Persistent Contact Alias Storage (Per-Contact Custom Names)

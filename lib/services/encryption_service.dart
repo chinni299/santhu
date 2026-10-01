@@ -9,38 +9,51 @@ class EncryptionService {
   factory EncryptionService() => _instance;
   EncryptionService._internal();
 
-  final _storage = const FlutterSecureStorage();
+  final _storage = const FlutterSecureStorage(
+    aOptions: AndroidOptions(resetOnError: true),
+  );
   final _x25519 = X25519();
   final _aesGcm = AesGcm.with256bits();
   final _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
 
-  KeyPair? _ownKeyPair;
-  String? _ownPublicKeyB64;
+  final Map<int, KeyPair> _userKeyPairMap = {};
+  final Map<int, String> _userPubKeyMap = {};
   final Map<String, SecretKey> _sharedKeyCache = {};
 
-  /// Initialize local device X25519 keypair
-  Future<String> initKeyPair() async {
-    if (_ownPublicKeyB64 != null && _ownKeyPair != null) {
-      return _ownPublicKeyB64!;
+  String _privKey(int userId) => 'e2ee_private_key_$userId';
+  String _pubKey(int userId) => 'e2ee_public_key_$userId';
+
+  /// Initialize local device X25519 keypair per-user
+  Future<String> initKeyPair([int userId = 1]) async {
+    if (_userPubKeyMap.containsKey(userId) && _userKeyPairMap.containsKey(userId)) {
+      return _userPubKeyMap[userId]!;
     }
 
-    final storedPrivateB64 = await _storage.read(key: 'e2ee_private_key');
-    final storedPublicB64 = await _storage.read(key: 'e2ee_public_key');
+    final privKeyName = _privKey(userId);
+    final pubKeyName = _pubKey(userId);
+
+    var storedPrivateB64 = await _storage.read(key: privKeyName);
+    var storedPublicB64 = await _storage.read(key: pubKeyName);
 
     if (storedPrivateB64 != null && storedPublicB64 != null) {
-      final privateBytes = base64Decode(storedPrivateB64);
-      final publicBytes = base64Decode(storedPublicB64);
+      try {
+        final privateBytes = base64Decode(storedPrivateB64);
+        final publicBytes = base64Decode(storedPublicB64);
 
-      _ownKeyPair = SimpleKeyPairData(
-        privateBytes,
-        publicKey: SimplePublicKey(publicBytes, type: KeyPairType.x25519),
-        type: KeyPairType.x25519,
-      );
-      _ownPublicKeyB64 = storedPublicB64;
-      return _ownPublicKeyB64!;
+        final keyPair = SimpleKeyPairData(
+          privateBytes,
+          publicKey: SimplePublicKey(publicBytes, type: KeyPairType.x25519),
+          type: KeyPairType.x25519,
+        );
+        _userKeyPairMap[userId] = keyPair;
+        _userPubKeyMap[userId] = storedPublicB64;
+        return storedPublicB64;
+      } catch (e) {
+        // Corrupted key -> regenerate
+      }
     }
 
-    // Generate new secure keypair
+    // Generate new secure keypair for this specific user
     final keyPair = await _x25519.newKeyPair();
     final pk = await keyPair.extractPublicKey();
     final privateBytes = await keyPair.extractPrivateKeyBytes();
@@ -48,35 +61,36 @@ class EncryptionService {
     final pubB64 = base64Encode(pk.bytes);
     final privB64 = base64Encode(privateBytes);
 
-    await _storage.write(key: 'e2ee_private_key', value: privB64);
-    await _storage.write(key: 'e2ee_public_key', value: pubB64);
+    await _storage.write(key: privKeyName, value: privB64);
+    await _storage.write(key: pubKeyName, value: pubB64);
 
-    _ownKeyPair = keyPair;
-    _ownPublicKeyB64 = pubB64;
-    return _ownPublicKeyB64!;
+    _userKeyPairMap[userId] = keyPair;
+    _userPubKeyMap[userId] = pubB64;
+    return pubB64;
   }
 
-  /// Get current public key
-  Future<String> getPublicKey() async {
-    if (_ownPublicKeyB64 != null) return _ownPublicKeyB64!;
-    return await initKeyPair();
+  /// Get current public key for specific user
+  Future<String> getPublicKey([int userId = 1]) async {
+    if (_userPubKeyMap.containsKey(userId)) return _userPubKeyMap[userId]!;
+    return await initKeyPair(userId);
   }
 
-  /// Derive shared symmetric key using X25519 + HKDF-SHA256
-  Future<SecretKey> getSharedKey(String peerPublicKeyB64) async {
-    if (_sharedKeyCache.containsKey(peerPublicKeyB64)) {
-      return _sharedKeyCache[peerPublicKeyB64]!;
+  /// Derive shared symmetric key using X25519 + HKDF-SHA256 for specific user
+  Future<SecretKey> getSharedKey(String peerPublicKeyB64, [int userId = 1]) async {
+    final cacheKey = '$userId:$peerPublicKeyB64';
+    if (_sharedKeyCache.containsKey(cacheKey)) {
+      return _sharedKeyCache[cacheKey]!;
     }
 
-    if (_ownKeyPair == null) {
-      await initKeyPair();
+    if (!_userKeyPairMap.containsKey(userId)) {
+      await initKeyPair(userId);
     }
 
     final peerPublicBytes = base64Decode(peerPublicKeyB64);
     final peerPublicKey = SimplePublicKey(peerPublicBytes, type: KeyPairType.x25519);
 
     final sharedSecret = await _x25519.sharedSecretKey(
-      keyPair: _ownKeyPair!,
+      keyPair: _userKeyPairMap[userId]!,
       remotePublicKey: peerPublicKey,
     );
 
@@ -85,7 +99,7 @@ class EncryptionService {
       nonce: utf8.encode('DuoChatE2EESalt'),
     );
 
-    _sharedKeyCache[peerPublicKeyB64] = derivedKey;
+    _sharedKeyCache[cacheKey] = derivedKey;
     return derivedKey;
   }
 

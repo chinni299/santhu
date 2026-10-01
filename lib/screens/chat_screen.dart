@@ -268,14 +268,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _initE2EE() async {
     try {
-      await EncryptionService().initKeyPair();
+      await EncryptionService().initKeyPair(widget.currentUserId);
       await AuthService.registerPublicKey(widget.currentUserId);
 
       final peerUserId = widget.currentUserId == 1 ? 2 : 1;
-      final peerPubKey = await AuthService.getPeerPublicKey(peerUserId);
+      final peerPubKey = await AuthService.getPeerPublicKey(peerUserId, widget.currentUserId);
 
       if (peerPubKey != null && peerPubKey.isNotEmpty) {
-        final sharedKey = await EncryptionService().getSharedKey(peerPubKey);
+        final sharedKey = await EncryptionService().getSharedKey(peerPubKey, widget.currentUserId);
         if (mounted) {
           setState(() {
             _sharedSecretKey = sharedKey;
@@ -316,6 +316,8 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  bool _isRefreshingKey = false;
+
   Future<String> _decryptTextAsync(dynamic rawMessage, dynamic nonce, dynamic isEncrypted, bool isDeleted) async {
     if (isDeleted) return 'This message was deleted';
     if (rawMessage == null || rawMessage.toString().isEmpty) return '';
@@ -326,12 +328,20 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     if (_sharedSecretKey == null) {
+      if (!_isRefreshingKey) {
+        _isRefreshingKey = true;
+        _initE2EE().then((_) => _isRefreshingKey = false);
+      }
       return rawMessage.toString();
     }
 
     try {
       final decrypted = await EncryptionService().decryptText(rawMessage.toString(), nonce.toString(), _sharedSecretKey!);
       if (decrypted.startsWith('[Decryption Error:')) {
+        if (!_isRefreshingKey) {
+          _isRefreshingKey = true;
+          _initE2EE().then((_) => _isRefreshingKey = false);
+        }
         return rawMessage.toString();
       }
       return decrypted;
