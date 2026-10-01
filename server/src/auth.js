@@ -129,13 +129,67 @@ router.post("/fcm-token", authenticateToken, async (req, res) => {
   }
 });
 
-// DB Migration for Public Key Column
+// DB Migration for Public Key & Key Vault Columns
 pool.query(`
   ALTER TABLE users ADD COLUMN IF NOT EXISTS public_key TEXT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS key_vault JSONB;
 `).then(() => {
-  console.log("Users table public_key column verified ✅");
+  console.log("Users table public_key and key_vault columns verified ✅");
 }).catch((err) => {
-  console.error("Migration error for public_key column:", err.message);
+  console.error("Migration error for key_vault column:", err.message);
+});
+
+// GET KEY VAULT (Requires JWT Authentication)
+router.get("/key-vault", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user?.userId || req.user?.id;
+    const result = await pool.query(
+      "SELECT id, public_key, key_vault FROM users WHERE id = $1",
+      [userId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    const user = result.rows[0];
+    res.json({
+      success: true,
+      publicKey: user.public_key || null,
+      keyVault: user.key_vault || null,
+    });
+  } catch (error) {
+    console.error("Get key vault error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to retrieve key vault" });
+  }
+});
+
+// SAVE OR UPDATE ENCRYPTED KEY VAULT (Requires JWT Authentication)
+router.post("/key-vault", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user?.userId || req.user?.id;
+    const { keyVault, publicKey } = req.body;
+
+    if (!userId || !keyVault || !publicKey) {
+      return res.status(400).json({
+        success: false,
+        message: "keyVault and publicKey are required",
+      });
+    }
+
+    await pool.query(
+      "UPDATE users SET key_vault = $1, public_key = $2 WHERE id = $3",
+      [JSON.stringify(keyVault), publicKey, userId]
+    );
+
+    console.log(`Saved encrypted key vault for user ${userId} 🔐`);
+    res.json({
+      success: true,
+      message: "Key vault saved successfully",
+      publicKey,
+    });
+  } catch (error) {
+    console.error("Save key vault error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to save key vault" });
+  }
 });
 
 // REGISTER PUBLIC KEY (Requires JWT Authentication)

@@ -61,8 +61,8 @@ class _CallScreenState extends State<CallScreen> {
     super.initState();
     _callStatus = widget.isCaller ? 'Calling...' : 'Connecting call...';
     _isCameraOff = !widget.isVideoCall;
-    // Default speaker to true for video calls, true for audio call on mobile
-    _isSpeakerOn = true;
+    // Default speaker to false (earpiece) for audio calls, true for video calls
+    _isSpeakerOn = widget.isVideoCall;
     _initCall();
   }
 

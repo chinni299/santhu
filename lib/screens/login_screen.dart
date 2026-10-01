@@ -72,7 +72,7 @@ class _LoginScreenState extends State<LoginScreen> {
             : 1;
 
         if (token != null && user != null) {
-          await AuthService.saveSession(token.toString(), Map<String, dynamic>.from(user));
+          await AuthService.saveSession(token.toString(), Map<String, dynamic>.from(user), password);
         }
 
         if (!mounted) return;

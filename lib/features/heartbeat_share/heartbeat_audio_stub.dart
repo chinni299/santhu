@@ -1,18 +1,36 @@
-// Non-web (native Android/iOS) platform stub for Heartbeat Audio & Vibration
+import 'package:flutter/services.dart';
+
+// Non-web (native Android/iOS) platform implementation for Heartbeat Audio & Vibration
 
 class HeartbeatAudio {
+  static const MethodChannel _vibratorChannel = MethodChannel('duochat/vibrator');
   static bool _isMuted = false;
 
   static void playBeat(String beatType) {
-    // Audio synthesis fallback on native via system haptic / audio players if needed
+    if (_isMuted) return;
+    try {
+      _vibratorChannel.invokeMethod('vibrate', {'duration': beatType == 'lub' ? 90 : 50});
+    } catch (_) {
+      if (beatType == 'lub') {
+        HapticFeedback.heavyImpact();
+      } else {
+        HapticFeedback.mediumImpact();
+      }
+    }
   }
 
   static void vibrate(List<int> pattern) {
-    // Vibration handled safely on native
+    try {
+      _vibratorChannel.invokeMethod('vibratePattern', {'pattern': pattern});
+    } catch (_) {
+      HapticFeedback.heavyImpact();
+    }
   }
 
   static void stopVibrate() {
-    // Stop vibration
+    try {
+      _vibratorChannel.invokeMethod('cancel');
+    } catch (_) {}
   }
 
   static void setMuted(bool muted) {

@@ -193,9 +193,12 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
 
-    await _loadPeerProfile();
-    await _loadAuthHeaders();
-    await _initE2EE();
+    await Future.wait([
+      _loadPeerProfile(),
+      _loadAuthHeaders(),
+      _initE2EE(),
+    ]);
+
     fetchMessages(showLoading: messages.isEmpty);
     _initSocket();
     if (!kIsWeb) {
@@ -203,7 +206,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     fetchUnreadCount();
     fetchOtherUserStatus();
-    _checkOnThisDayMemories(); // NEW: surface "on this day" memories on open
+    _checkOnThisDayMemories();
   }
 
   Future<void> _loadPeerProfile() async {
@@ -308,8 +311,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _initE2EE() async {
     try {
-      await EncryptionService().initKeyPair(currentUserId);
-      await AuthService.registerPublicKey(currentUserId);
+      final password = await AuthService.getPassword(currentUserId) ?? 'password123';
+      await EncryptionService().syncKeyVault(currentUserId, password);
 
       final peerUserId = currentUserId == 1 ? 2 : 1;
       final peerPubKey = await AuthService.getPeerPublicKey(peerUserId, currentUserId);
@@ -344,7 +347,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (isEncrypted && !isDeleted && nonce != null && rawText != null) {
         try {
           final decrypted = await EncryptionService().decryptText(rawText.toString(), nonce.toString(), _sharedSecretKey!);
-          if (!decrypted.startsWith('[Decryption Error:')) {
+          if (decrypted != '[Message unavailable]' && !decrypted.startsWith('[Decryption Error:')) {
             messages[i]['message'] = decrypted;
             updated = true;
           }
@@ -372,21 +375,15 @@ class _ChatScreenState extends State<ChatScreen> {
         _isRefreshingKey = true;
         _initE2EE().then((_) => _isRefreshingKey = false);
       }
-      return rawMessage.toString();
+      return '[Message unavailable]';
     }
 
     try {
       final decrypted = await EncryptionService().decryptText(rawMessage.toString(), nonce.toString(), _sharedSecretKey!);
-      if (decrypted.startsWith('[Decryption Error:')) {
-        if (!_isRefreshingKey) {
-          _isRefreshingKey = true;
-          _initE2EE().then((_) => _isRefreshingKey = false);
-        }
-        return rawMessage.toString();
-      }
       return decrypted;
-    } catch (_) {
-      return rawMessage.toString();
+    } catch (e) {
+      debugPrint('[E2EE DECRYPT EXCEPTION] $e');
+      return '[Message unavailable]';
     }
   }
 
@@ -419,7 +416,14 @@ class _ChatScreenState extends State<ChatScreen> {
     return cleanUrl;
   }
 
-  Future<void> _saveImageToGallery(String imageUrl, {bool isLocalFile = false}) async {
+  Future<void> _saveImageToGallery(
+    String imageUrl, {
+    bool isLocalFile = false,
+    String? nonce,
+    bool isEncrypted = false,
+    String? localFilePath,
+    Uint8List? memoryBytes,
+  }) async {
     try {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -440,14 +444,23 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
 
-      Uint8List? bytes;
-      if (isLocalFile && !kIsWeb) {
-        bytes = await File(imageUrl).readAsBytes();
-      } else {
-        final headers = await AuthService.getAuthHeadersForUser(currentUserId);
-        final res = await http.get(Uri.parse(imageUrl), headers: headers);
-        if (res.statusCode == 200) {
-          bytes = res.bodyBytes;
+      Uint8List? bytes = memoryBytes;
+
+      if (bytes == null || bytes.isEmpty) {
+        if (localFilePath != null && !kIsWeb && File(localFilePath).existsSync()) {
+          bytes = await File(localFilePath).readAsBytes();
+        } else if (isLocalFile && !kIsWeb && File(imageUrl).existsSync()) {
+          bytes = await File(imageUrl).readAsBytes();
+        } else if (isEncrypted && nonce != null && nonce.isNotEmpty) {
+          final formattedUrl = _getFormattedImageUrl(imageUrl) ?? imageUrl;
+          bytes = await _fetchAndDecryptMediaBytes(formattedUrl, nonce);
+        } else {
+          final formattedUrl = _getFormattedImageUrl(imageUrl) ?? imageUrl;
+          final headers = await AuthService.getAuthHeadersForUser(currentUserId);
+          final res = await http.get(Uri.parse(formattedUrl), headers: headers);
+          if (res.statusCode == 200) {
+            bytes = res.bodyBytes;
+          }
         }
       }
 
@@ -458,7 +471,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (kIsWeb) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Image saved successfully Î“Â£Ã ")),
+            const SnackBar(content: Text("Image saved successfully 📷")),
           );
         }
         return;
@@ -501,7 +514,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Saved directly to Gallery ($filename) â‰¡Æ’Ã»â•âˆ©â••Ã…Î“Â£Ã "),
+            content: Text("Saved directly to Gallery ($filename) 📷"),
             backgroundColor: AppTheme.primaryTeal,
             duration: const Duration(seconds: 3),
             action: SnackBarAction(
@@ -524,7 +537,15 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _openFullImageViewer(String imageUrl, {bool isLocalFile = false}) {
+  void _openFullImageViewer(
+    String imageUrl, {
+    bool isLocalFile = false,
+    String? nonce,
+    bool isEncrypted = false,
+    String? localFilePath,
+  }) {
+    Uint8List? loadedBytes;
+
     showDialog(
       context: context,
       builder: (ctx) => Dialog.fullscreen(
@@ -535,21 +556,55 @@ class _ChatScreenState extends State<ChatScreen> {
               child: InteractiveViewer(
                 minScale: 0.5,
                 maxScale: 4.0,
-                child: (isLocalFile && !kIsWeb)
-                    ? Image.file(File(imageUrl), fit: BoxFit.contain)
-                    : Image.network(
-                        imageUrl,
-                        headers: _authHeaders,
-                        fit: BoxFit.contain,
-                        errorBuilder: (_, _, _) => const Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.broken_image_rounded, size: 64, color: Colors.white54),
-                            SizedBox(height: 12),
-                            Text("Could not load image", style: TextStyle(color: Colors.white70)),
-                          ],
-                        ),
+                child: Builder(
+                  builder: (context) {
+                    if (localFilePath != null && !kIsWeb && File(localFilePath).existsSync()) {
+                      return Image.file(File(localFilePath), fit: BoxFit.contain);
+                    }
+                    if (isLocalFile && !kIsWeb && File(imageUrl).existsSync()) {
+                      return Image.file(File(imageUrl), fit: BoxFit.contain);
+                    }
+                    if (isEncrypted && nonce != null && nonce.isNotEmpty) {
+                      final formattedUrl = _getFormattedImageUrl(imageUrl) ?? imageUrl;
+                      return FutureBuilder<Uint8List>(
+                        future: _fetchAndDecryptMediaBytes(formattedUrl, nonce),
+                        builder: (context, snapshot) {
+                          if (snapshot.connectionState == ConnectionState.waiting) {
+                            return const Center(
+                              child: CircularProgressIndicator(color: AppTheme.primaryTeal),
+                            );
+                          }
+                          if (snapshot.hasError || !snapshot.hasData) {
+                            return const Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.broken_image_rounded, size: 64, color: Colors.white54),
+                                SizedBox(height: 12),
+                                Text("Could not load image", style: TextStyle(color: Colors.white70)),
+                              ],
+                            );
+                          }
+                          loadedBytes = snapshot.data;
+                          return Image.memory(snapshot.data!, fit: BoxFit.contain);
+                        },
+                      );
+                    }
+                    final formattedUrl = _getFormattedImageUrl(imageUrl) ?? imageUrl;
+                    return Image.network(
+                      formattedUrl,
+                      headers: _authHeaders,
+                      fit: BoxFit.contain,
+                      errorBuilder: (_, _, _) => const Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.broken_image_rounded, size: 64, color: Colors.white54),
+                          SizedBox(height: 12),
+                          Text("Could not load image", style: TextStyle(color: Colors.white70)),
+                        ],
                       ),
+                    );
+                  },
+                ),
               ),
             ),
             // Top Action Bar with Download / Save to Gallery Button
@@ -592,7 +647,14 @@ class _ChatScreenState extends State<ChatScreen> {
                             "Save to Gallery",
                             style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                           ),
-                          onPressed: () => _saveImageToGallery(imageUrl, isLocalFile: isLocalFile),
+                          onPressed: () => _saveImageToGallery(
+                            imageUrl,
+                            isLocalFile: isLocalFile,
+                            nonce: nonce,
+                            isEncrypted: isEncrypted,
+                            localFilePath: localFilePath,
+                            memoryBytes: loadedBytes,
+                          ),
                         ),
                         const SizedBox(width: 8),
                         CircleAvatar(
@@ -880,6 +942,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _toggleReaction(dynamic messageId, String emoji) {
     if (messageId == null) return;
+    HapticFeedback.heavyImpact();
     socket?.emit('reactToMessage', {
       'conversationId': widget.conversationId,
       'messageId': messageId,
@@ -1350,8 +1413,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
       setState(() {
         if (existingIndex != -1) {
+          final existingMsg = messages[existingIndex];
+          final preservedMessage = (existingMsg['isMe'] == true &&
+                  (decryptedText == '[Message unavailable]' || decryptedText.isEmpty))
+              ? existingMsg['message']
+              : decryptedText;
+
           messages[existingIndex] = {
             ...newMessageMap,
+            'message': preservedMessage,
             'isMe': newMessageMap['isMe'],
           };
         } else {
@@ -1569,7 +1639,7 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
     // NEW: Pinned Messages
-    socket?.on('messagePinned', (data) {
+    socket?.on('messagePinned', (data) async {
       if (data == null) return;
       final convId = data['conversationId'];
       if (convId != null && convId.toString() != widget.conversationId.toString()) return;
@@ -1577,11 +1647,33 @@ class _ChatScreenState extends State<ChatScreen> {
       final msgData = data['message'];
       if (msgData == null) return;
 
+      final rawMap = Map<String, dynamic>.from(msgData);
+      final msgId = rawMap['id']?.toString();
+
+      final existingMsg = messages.firstWhere(
+        (m) => m['id'] != null && m['id'].toString() == msgId,
+        orElse: () => {},
+      );
+
+      String displayText = '';
+      if (existingMsg.isNotEmpty && existingMsg['message'] != null && existingMsg['message'].toString().isNotEmpty) {
+        displayText = existingMsg['message'].toString();
+      } else {
+        displayText = await _decryptTextAsync(
+          rawMap['message'],
+          rawMap['nonce'],
+          rawMap['is_encrypted'] == true || rawMap['isEncrypted'] == true,
+          rawMap['is_deleted'] == true || rawMap['isDeleted'] == true,
+        );
+      }
+
+      rawMap['message'] = displayText;
+
       if (!mounted) return;
       setState(() {
-        pinnedMessage = Map<String, dynamic>.from(msgData);
+        pinnedMessage = rawMap;
         for (var m in messages) {
-          m['isPinned'] = m['id'] != null && m['id'].toString() == pinnedMessage!['id'].toString();
+          m['isPinned'] = m['id'] != null && m['id'].toString() == msgId;
         }
       });
     });
@@ -2401,6 +2493,8 @@ class _ChatScreenState extends State<ChatScreen> {
                         currentUserId: currentUserId,
                         conversationId: widget.conversationId,
                         peerName: peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1'),
+                        peerUserId: otherUserId,
+                        sharedSecretKey: _sharedSecretKey,
                       ),
                     ),
                   );
@@ -3238,86 +3332,87 @@ class _ChatScreenState extends State<ChatScreen> {
           final List fetchedData = data['data'];
           debugPrint("[CHAT] Messages loaded from persistence: ${fetchedData.length}");
 
-          final List<Map<String, dynamic>> parsedMessages = [];
-          for (final item in fetchedData) {
-            final rawTime = item['created_at'] != null ? item['created_at'].toString() : '';
-            final bool isRead = item['is_read'] == true || item['isRead'] == true;
-            final bool isDelivered = isRead || item['is_delivered'] == true || item['isDelivered'] == true;
-            final bool isEdited = item['is_edited'] == true || item['isEdited'] == true;
-            final bool isDeleted = item['is_deleted'] == true || item['isDeleted'] == true;
-            final nonce = item['nonce'];
-            final isEncrypted = item['is_encrypted'] == true || item['isEncrypted'] == true;
+          final List<Map<String, dynamic>> parsedMessages = await Future.wait(
+            fetchedData.map((item) async {
+              final rawTime = item['created_at'] != null ? item['created_at'].toString() : '';
+              final bool isRead = item['is_read'] == true || item['isRead'] == true;
+              final bool isDelivered = isRead || item['is_delivered'] == true || item['isDelivered'] == true;
+              final bool isEdited = item['is_edited'] == true || item['isEdited'] == true;
+              final bool isDeleted = item['is_deleted'] == true || item['isDeleted'] == true;
+              final nonce = item['nonce'];
+              final isEncrypted = item['is_encrypted'] == true || item['isEncrypted'] == true;
 
-            final replyToMessageId = item['reply_to_message_id'] ?? item['replyToMessageId'];
-            final replySenderId = item['reply_sender_id'] ?? item['replySenderId'];
-            final replySenderName = item['reply_sender_name'] ?? item['replySenderName'];
-            final replyMessage = item['reply_message'] ?? item['replyMessage'];
-            final replyAttachmentType = item['reply_attachment_type'] ?? item['replyAttachmentType'];
-            final replyAttachmentName = item['reply_attachment_name'] ?? item['replyAttachmentName'];
-            final bool replyIsDeleted = item['reply_is_deleted'] == true;
+              final replyToMessageId = item['reply_to_message_id'] ?? item['replyToMessageId'];
+              final replySenderId = item['reply_sender_id'] ?? item['replySenderId'];
+              final replySenderName = item['reply_sender_name'] ?? item['replySenderName'];
+              final replyMessage = item['reply_message'] ?? item['replyMessage'];
+              final replyAttachmentType = item['reply_attachment_type'] ?? item['replyAttachmentType'];
+              final replyAttachmentName = item['reply_attachment_name'] ?? item['replyAttachmentName'];
+              final bool replyIsDeleted = item['reply_is_deleted'] == true;
 
-            final reactions = item['reactions'] is Map
-                ? Map<String, dynamic>.from(item['reactions'])
-                : <String, dynamic>{};
+              final reactions = item['reactions'] is Map
+                  ? Map<String, dynamic>.from(item['reactions'])
+                  : <String, dynamic>{};
 
-            final bool isPinnedItem = item['is_pinned'] == true;
-            final bool liveStillActive = item['live_location_active'] == true;
+              final bool isPinnedItem = item['is_pinned'] == true;
+              final bool liveStillActive = item['live_location_active'] == true;
 
-            String rawText = (item['message'] ?? '').toString();
-            if ((item['attachment_type'] ?? item['attachmentType']) == 'location' && !liveStillActive) {
-              try {
-                final locJson = jsonDecode(rawText);
-                if (locJson is Map && locJson['isLive'] == true) {
-                  locJson['isLive'] = false;
-                  rawText = jsonEncode(locJson);
-                }
-              } catch (_) {}
-            }
+              String rawText = (item['message'] ?? '').toString();
+              if ((item['attachment_type'] ?? item['attachmentType']) == 'location' && !liveStillActive) {
+                try {
+                  final locJson = jsonDecode(rawText);
+                  if (locJson is Map && locJson['isLive'] == true) {
+                    locJson['isLive'] = false;
+                    rawText = jsonEncode(locJson);
+                  }
+                } catch (_) {}
+              }
 
-            final msgId = item['id'];
-            final decryptedText = await _decryptTextAsync(rawText, nonce, isEncrypted, isDeleted);
+              final msgId = item['id'];
+              final decryptedText = await _decryptTextAsync(rawText, nonce, isEncrypted, isDeleted);
 
-            parsedMessages.add({
-              'id': msgId,
-              'sender_id': item['sender_id'] ?? item['senderId'],
-              'senderId': item['sender_id'] ?? item['senderId'],
-              'message': decryptedText,
-              'rawMessage': rawText,
-              'nonce': nonce,
-              'isEncrypted': isEncrypted,
-              'is_encrypted': isEncrypted,
-              'attachmentUrl': item['attachment_url'] ?? item['attachmentUrl'],
-              'attachmentType': item['attachment_type'] ?? item['attachmentType'],
-              'attachmentName': item['attachment_name'] ?? item['attachmentName'],
-              'attachmentSize': item['attachment_size'] ?? item['attachmentSize'],
-              'replyToMessageId': replyToMessageId,
-              'reply_to_message_id': replyToMessageId,
-              'replySenderId': replySenderId,
-              'reply_sender_id': replySenderId,
-              'replySenderName': replySenderName,
-              'reply_sender_name': replySenderName,
-              'replyMessage': replyMessage,
-              'reply_message': replyMessage,
-              'replyAttachmentType': replyAttachmentType,
-              'reply_attachment_type': replyAttachmentType,
-              'replyAttachmentName': replyAttachmentName,
-              'reply_attachment_name': replyAttachmentName,
-              'replyIsDeleted': replyIsDeleted,
-              'reply_is_deleted': replyIsDeleted,
-              'isMe': _isMessageFromMe(item),
-              'isDelivered': isDelivered,
-              'is_delivered': isDelivered,
-              'isRead': isRead,
-              'is_read': isRead,
-              'isEdited': isEdited,
-              'is_edited': isEdited,
-              'isDeleted': isDeleted,
-              'is_deleted': isDeleted,
-              'reactions': reactions,
-              'isPinned': isPinnedItem,
-              'time': _formatTime(rawTime),
-            });
-          }
+              return {
+                'id': msgId,
+                'sender_id': item['sender_id'] ?? item['senderId'],
+                'senderId': item['sender_id'] ?? item['senderId'],
+                'message': decryptedText,
+                'rawMessage': rawText,
+                'nonce': nonce,
+                'isEncrypted': isEncrypted,
+                'is_encrypted': isEncrypted,
+                'attachmentUrl': item['attachment_url'] ?? item['attachmentUrl'],
+                'attachmentType': item['attachment_type'] ?? item['attachmentType'],
+                'attachmentName': item['attachment_name'] ?? item['attachmentName'],
+                'attachmentSize': item['attachment_size'] ?? item['attachmentSize'],
+                'replyToMessageId': replyToMessageId,
+                'reply_to_message_id': replyToMessageId,
+                'replySenderId': replySenderId,
+                'reply_sender_id': replySenderId,
+                'replySenderName': replySenderName,
+                'reply_sender_name': replySenderName,
+                'replyMessage': replyMessage,
+                'reply_message': replyMessage,
+                'replyAttachmentType': replyAttachmentType,
+                'reply_attachment_type': replyAttachmentType,
+                'replyAttachmentName': replyAttachmentName,
+                'reply_attachment_name': replyAttachmentName,
+                'replyIsDeleted': replyIsDeleted,
+                'reply_is_deleted': replyIsDeleted,
+                'isMe': _isMessageFromMe(item),
+                'isDelivered': isDelivered,
+                'is_delivered': isDelivered,
+                'isRead': isRead,
+                'is_read': isRead,
+                'isEdited': isEdited,
+                'is_edited': isEdited,
+                'isDeleted': isDeleted,
+                'is_deleted': isDeleted,
+                'reactions': reactions,
+                'isPinned': isPinnedItem,
+                'time': _formatTime(rawTime),
+              };
+            }),
+          );
 
           debugPrint("=== HISTORY MESSAGE CHECK ===");
           if (parsedMessages.isNotEmpty) {
@@ -3337,11 +3432,11 @@ class _ChatScreenState extends State<ChatScreen> {
             messages.addAll(parsedMessages);
             isLoading = false;
 
-            // Restore the pinned-message banner after an app restart / reload
+            // Restore the pinned-message banner from the decrypted parsedMessages!
             pinnedMessage = null;
-            for (final raw in fetchedData) {
-              if (raw['is_pinned'] == true && raw['is_deleted'] != true) {
-                pinnedMessage = Map<String, dynamic>.from(raw as Map);
+            for (final m in parsedMessages) {
+              if (m['isPinned'] == true && m['isDeleted'] != true) {
+                pinnedMessage = Map<String, dynamic>.from(m);
                 break;
               }
             }
@@ -4669,13 +4764,13 @@ class _ChatScreenState extends State<ChatScreen> {
                               style: TextStyle(color: AppTheme.primaryTeal, fontWeight: FontWeight.w900, fontSize: 11.5),
                             ),
                             Text(
-                              pinnedMessage!['attachment_type'] == 'image'
+                              (pinnedMessage!['attachment_type'] ?? pinnedMessage!['attachmentType']) == 'image'
                                   ? '📷 Photo'
-                                  : pinnedMessage!['attachment_type'] == 'audio'
+                                  : (pinnedMessage!['attachment_type'] ?? pinnedMessage!['attachmentType']) == 'audio'
                                       ? '🎤 Voice message'
-                                      : pinnedMessage!['attachment_type'] == 'file'
-                                          ? '📎 ${pinnedMessage!['attachment_name'] ?? 'File'}'
-                                          : pinnedMessage!['attachment_type'] == 'location'
+                                      : (pinnedMessage!['attachment_type'] ?? pinnedMessage!['attachmentType']) == 'file'
+                                          ? '📎 ${pinnedMessage!['attachment_name'] ?? pinnedMessage!['attachmentName'] ?? 'File'}'
+                                          : (pinnedMessage!['attachment_type'] ?? pinnedMessage!['attachmentType']) == 'location'
                                               ? '📍 Location'
                                               : (pinnedMessage!['message']?.toString().isNotEmpty == true ? pinnedMessage!['message'].toString() : 'Message'),
                               maxLines: 1,
@@ -5104,7 +5199,13 @@ class _ChatScreenState extends State<ChatScreen> {
                                                 // Attachment / Text
                                                 if (isImageMessage) ...[
                                                   GestureDetector(
-                                                    onTap: () => _openFullImageViewer(formattedImgUrl, isLocalFile: isLocalFile),
+                                                    onTap: () => _openFullImageViewer(
+                                                      formattedImgUrl,
+                                                      isLocalFile: isLocalFile,
+                                                      nonce: message['nonce']?.toString(),
+                                                      isEncrypted: message['isEncrypted'] == true || message['is_encrypted'] == true,
+                                                      localFilePath: message['localFilePath']?.toString(),
+                                                    ),
                                                     child: ClipRRect(
                                                       borderRadius: BorderRadius.circular(15),
                                                       child: Stack(

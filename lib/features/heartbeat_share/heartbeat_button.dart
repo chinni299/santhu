@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import 'heartbeat_service.dart';
 
@@ -47,6 +48,7 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
 
   void _onPressDown() {
     if (_isHolding) return;
+    HapticFeedback.heavyImpact();
     _pressDownTime = DateTime.now().millisecondsSinceEpoch;
 
     debugPrint('[HEARTBEAT BUTTON] Press down triggered. Socket connected: ${widget.socket?.connected}, user: ${widget.currentUserId}');
@@ -73,10 +75,12 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
 
     if (duration < 350) {
       // Short click / Tap -> send a 3-second heartbeat burst to partner!
+      HapticFeedback.mediumImpact();
       HeartbeatService.extendForTapBurst(widget.socket, widget.conversationId, 3, widget.currentUserId);
       _showSentToast();
     } else {
       // Long press / Hold -> stop immediately when user releases
+      HapticFeedback.lightImpact();
       HeartbeatService.stopSending(
         socket: widget.socket,
         conversationId: widget.conversationId,

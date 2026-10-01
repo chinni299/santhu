@@ -138,7 +138,7 @@ class AuthService {
   }
 
   // Save JWT token and User session to Secure Storage (per-user key)
-  static Future<void> saveSession(String token, Map<String, dynamic> user) async {
+  static Future<void> saveSession(String token, Map<String, dynamic> user, [String? password]) async {
     final userId = int.tryParse((user['id'] ?? 0).toString()) ?? 0;
     // Write to both legacy key and per-user key
     await _writeSecure(_tokenKey, token);
@@ -146,7 +146,14 @@ class AuthService {
     if (userId > 0) {
       await _writeSecure(_tokenKeyForUser(userId), token);
       await _writeSecure(_userKeyForUser(userId), jsonEncode(user));
+      if (password != null && password.isNotEmpty) {
+        await _writeSecure('duochat_session_pass_$userId', password);
+      }
     }
+  }
+
+  static Future<String?> getPassword(int userId) async {
+    return await _readSecure('duochat_session_pass_$userId');
   }
 
   // Get stored JWT token for the legacy/last-logged-in user
@@ -179,6 +186,7 @@ class AuthService {
     if (userId > 0) {
       await _deleteSecure(_tokenKeyForUser(userId));
       await _deleteSecure(_userKeyForUser(userId));
+      await _deleteSecure('duochat_session_pass_$userId');
     }
   }
 
@@ -215,7 +223,7 @@ class AuthService {
       final token = data['token'];
       final user = data['user'];
       if (token != null && user != null) {
-        await saveSession(token, user);
+        await saveSession(token, user, password);
       }
     }
 
@@ -236,6 +244,47 @@ class AuthService {
     } catch (e) {
       debugPrint("Error updating FCM token: $e");
     }
+  }
+
+  // Fetch encrypted key vault from backend
+  static Future<Map<String, dynamic>?> fetchKeyVault(int userId) async {
+    try {
+      final headers = await getAuthHeadersForUser(userId);
+      final url = Uri.parse('${ApiConfig.baseUrl}/auth/key-vault');
+      final response = await http.get(url, headers: headers);
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['success'] == true) {
+          return data;
+        }
+      }
+    } catch (e) {
+      debugPrint("Error fetching key vault for user $userId: $e");
+    }
+    return null;
+  }
+
+  // Save encrypted key vault to backend
+  static Future<bool> saveKeyVault(int userId, Map<String, dynamic> keyVault, String publicKey) async {
+    try {
+      final headers = await getAuthHeadersForUser(userId);
+      final url = Uri.parse('${ApiConfig.baseUrl}/auth/key-vault');
+      final response = await http.post(
+        url,
+        headers: headers,
+        body: jsonEncode({
+          'keyVault': keyVault,
+          'publicKey': publicKey,
+        }),
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['success'] == true;
+      }
+    } catch (e) {
+      debugPrint("Error saving key vault for user $userId: $e");
+    }
+    return false;
   }
 
   // Register local X25519 Public Key with backend

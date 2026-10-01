@@ -839,7 +839,7 @@ router.get("/media/:conversationId", async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT id, conversation_id, sender_id, attachment_url, attachment_type, attachment_name, attachment_size, created_at
+      `SELECT id, conversation_id, sender_id, attachment_url, attachment_type, attachment_name, attachment_size, is_encrypted, nonce, created_at
        FROM messages
        WHERE conversation_id = $1
          AND is_deleted = false
