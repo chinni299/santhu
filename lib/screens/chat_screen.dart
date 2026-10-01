@@ -34,6 +34,8 @@ import 'call_history_screen.dart';
 import '../features/heartbeat_share/heartbeat_button.dart';
 import '../features/heartbeat_share/heartbeat_overlay.dart';
 import '../features/heartbeat_share/heartbeat_service.dart';
+import '../features/finger_trail/finger_trail_service.dart';
+import '../features/finger_trail/finger_trail_overlay.dart';
 
 
 class ChatScreen extends StatefulWidget {
@@ -74,6 +76,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // Heartbeat Share State
   bool _isReceivingHeartbeat = false;
+
+  // Finger Trail (Touch Together) State
+  bool _showFingerTrail = false;
 
   // Emoji Picker State
   bool _showEmojiPicker = false;
@@ -1166,6 +1171,9 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() => _isReceivingHeartbeat = isActive);
       }
     };
+
+    // Initialize Finger Trail (Touch Together) Service
+    FingerTrailService.initialize(socket, widget.conversationId);
 
     socket?.onConnectError((err) {
       debugPrint('[CHAT SOCKET] CONNECT ERROR: $err');
@@ -5675,6 +5683,27 @@ class _ChatScreenState extends State<ChatScreen> {
                         conversationId: widget.conversationId,
                         isPartnerOnline: isOtherUserOnline,
                       ),
+                      // Touch Together button
+                      GestureDetector(
+                        onTap: () => setState(() => _showFingerTrail = true),
+                        child: Container(
+                          margin: const EdgeInsets.only(right: 2),
+                          padding: const EdgeInsets.all(7),
+                          decoration: BoxDecoration(
+                            color: _showFingerTrail
+                                ? AppTheme.primaryTeal.withValues(alpha: 0.25)
+                                : Colors.transparent,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            Icons.gesture_rounded,
+                            color: _showFingerTrail
+                                ? AppTheme.primaryTeal
+                                : (isDark ? Colors.grey.shade300 : const Color(0xFF111B21)),
+                            size: 22,
+                          ),
+                        ),
+                      ),
                       const SizedBox(width: 2),
                       (messageController.text.trim().isEmpty && editingMessageId == null)
                           ? GestureDetector(
@@ -5802,6 +5831,15 @@ class _ChatScreenState extends State<ChatScreen> {
             if (_isReceivingHeartbeat)
               const Positioned.fill(
                 child: HeartbeatOverlay(),
+              ),
+
+            // Touch Together (Live Finger Trail) full-screen overlay
+            if (_showFingerTrail)
+              Positioned.fill(
+                child: FingerTrailOverlay(
+                  currentUserId: widget.currentUserId,
+                  onClose: () => setState(() => _showFingerTrail = false),
+                ),
               ),
           ],
         ),

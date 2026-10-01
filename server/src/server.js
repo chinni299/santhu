@@ -7,6 +7,7 @@ const authRoutes = require("./auth");
 const messageRoutes = require("./messages");
 const cors = require("cors");
 const { registerHeartbeatHandlers } = require("./heartbeat_handler");
+const { registerFingerTrailHandlers } = require("./finger_trail_handler");
 
 const pool = require("./db");
 const { redis, isRedisEnabled } = require("./redisClient");
@@ -437,6 +438,7 @@ async function sweepExpiredLiveLocations() {
 // Socket.IO Connection Handler
 io.on("connection", (socket) => {
   registerHeartbeatHandlers(io, socket, userSockets);
+  registerFingerTrailHandlers(io, socket);
   const authUserId = socket.user?.userId || socket.user?.id;
   console.log(`[SERVER SOCKET] CLIENT CONNECTED: socketId=${socket.id}`);
   console.log(`[SERVER SOCKET] USER: ${authUserId}`);
