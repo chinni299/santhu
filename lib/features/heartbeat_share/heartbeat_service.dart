@@ -9,6 +9,7 @@ typedef OnOfflineCallback = void Function();
 
 class HeartbeatService {
   static Timer? _rhythmTimer;
+  static Timer? _tapBurstTimer;
   static bool _isSending = false;
   static bool _isReceiving = false;
   static int? _activeSenderId;
@@ -28,6 +29,9 @@ class HeartbeatService {
     bool isPartnerOnline = true,
     OnOfflineCallback? onOffline,
   }) {
+    _tapBurstTimer?.cancel();
+    _tapBurstTimer = null;
+
     if (socket == null || !socket.connected) {
       if (onOffline != null) onOffline();
       return false;
@@ -48,6 +52,14 @@ class HeartbeatService {
     // Start organic lub-dub rhythm generator (75 BPM => ~800ms cycle)
     _startRhythmLoop(socket, conversationId);
     return true;
+  }
+
+  /// Keep sending heartbeat for a 3-second burst after a short tap
+  static void extendForTapBurst(io.Socket? socket, int conversationId, [int seconds = 3]) {
+    _tapBurstTimer?.cancel();
+    _tapBurstTimer = Timer(Duration(seconds: seconds), () {
+      stopSending(socket: socket, conversationId: conversationId);
+    });
   }
 
   static void _startRhythmLoop(io.Socket socket, int conversationId) {
@@ -95,6 +107,9 @@ class HeartbeatService {
     required io.Socket? socket,
     required int conversationId,
   }) {
+    _tapBurstTimer?.cancel();
+    _tapBurstTimer = null;
+
     if (!_isSending) return;
     _isSending = false;
     _rhythmTimer?.cancel();
@@ -164,6 +179,8 @@ class HeartbeatService {
       _isSending = false;
       _rhythmTimer?.cancel();
       _rhythmTimer = null;
+      _tapBurstTimer?.cancel();
+      _tapBurstTimer = null;
       HeartbeatAudio.stopVibrate();
 
       if (onPartnerOffline != null) {
@@ -176,6 +193,8 @@ class HeartbeatService {
   static void cleanup(io.Socket? socket) {
     _rhythmTimer?.cancel();
     _rhythmTimer = null;
+    _tapBurstTimer?.cancel();
+    _tapBurstTimer = null;
     _isSending = false;
     _isReceiving = false;
     _activeSenderId = null;

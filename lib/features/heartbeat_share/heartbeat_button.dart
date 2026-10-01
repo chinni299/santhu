@@ -20,6 +20,7 @@ class HeartbeatButton extends StatefulWidget {
 
 class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProviderStateMixin {
   bool _isHolding = false;
+  int _pressDownTime = 0;
   late AnimationController _pulseController;
   late Animation<double> _scaleAnimation;
 
@@ -44,6 +45,7 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
 
   void _onPressDown() {
     if (_isHolding) return;
+    _pressDownTime = DateTime.now().millisecondsSinceEpoch;
 
     final started = HeartbeatService.startSending(
       socket: widget.socket,
@@ -60,10 +62,20 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
 
   void _onPressUp() {
     if (!_isHolding) return;
-    HeartbeatService.stopSending(
-      socket: widget.socket,
-      conversationId: widget.conversationId,
-    );
+    final duration = DateTime.now().millisecondsSinceEpoch - _pressDownTime;
+
+    if (duration < 350) {
+      // Short click / Tap -> send a 3-second heartbeat burst to partner!
+      HeartbeatService.extendForTapBurst(widget.socket, widget.conversationId, 3);
+      _showSentToast();
+    } else {
+      // Long press / Hold -> stop immediately when user releases
+      HeartbeatService.stopSending(
+        socket: widget.socket,
+        conversationId: widget.conversationId,
+      );
+    }
+
     _stopHoldingState();
   }
 
@@ -73,6 +85,29 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
       _pulseController.stop();
       _pulseController.reset();
     }
+  }
+
+  void _showSentToast() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Row(
+          children: [
+            Icon(Icons.favorite_rounded, color: Colors.white, size: 20),
+            SizedBox(width: 8),
+            Text(
+              'Sent Heartbeat to partner ❤️',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+            ),
+          ],
+        ),
+        backgroundColor: Colors.pinkAccent.shade400,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+    );
   }
 
   void _showOfflineSnackbar() {
