@@ -351,8 +351,8 @@ class AuthService {
     return null;
   }
 
-  static String getAvatarUrl(int userId) {
-    return '${ApiConfig.baseUrl}/auth/avatar/$userId';
+  static String? getAvatarUrl(int userId) {
+    return null;
   }
 
   static ImageProvider? getAvatarImageProvider(String? localPath, String? networkUrl) {
@@ -428,8 +428,10 @@ class AuthService {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         if (data['success'] == true) {
-          final serverUrl = data['avatar_url']?.toString() ?? getAvatarUrl(userId);
-          await saveAvatarPath(serverUrl, userId);
+          final serverUrl = data['avatar_url']?.toString() ?? '';
+          if (serverUrl.isNotEmpty) {
+            await saveAvatarPath(serverUrl, userId);
+          }
 
           // Update user session
           final user = await getUser();
