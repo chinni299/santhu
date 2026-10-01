@@ -26,6 +26,7 @@ class HeartbeatService {
   static bool startSending({
     required io.Socket? socket,
     required int conversationId,
+    int senderId = 1,
     bool isPartnerOnline = true,
     OnOfflineCallback? onOffline,
   }) {
@@ -41,28 +42,29 @@ class HeartbeatService {
     _isSending = true;
     onPartnerOffline = onOffline;
 
-    debugPrint('[HEARTBEAT SERVICE] EMITTING heartbeat_start to socket');
+    debugPrint('[HEARTBEAT SERVICE] EMITTING heartbeat_start to socket (user: $senderId, conv: $conversationId)');
 
     // Emit initial start event
     socket.emit('heartbeat_start', {
       'conversationId': conversationId,
+      'senderId': senderId,
       'bpm': 75,
     });
 
     // Start organic lub-dub rhythm generator (75 BPM => ~800ms cycle)
-    _startRhythmLoop(socket, conversationId);
+    _startRhythmLoop(socket, conversationId, senderId);
     return true;
   }
 
   /// Keep sending heartbeat for a 3-second burst after a short tap
-  static void extendForTapBurst(io.Socket? socket, int conversationId, [int seconds = 3]) {
+  static void extendForTapBurst(io.Socket? socket, int conversationId, [int seconds = 3, int senderId = 1]) {
     _tapBurstTimer?.cancel();
     _tapBurstTimer = Timer(Duration(seconds: seconds), () {
-      stopSending(socket: socket, conversationId: conversationId);
+      stopSending(socket: socket, conversationId: conversationId, senderId: senderId);
     });
   }
 
-  static void _startRhythmLoop(io.Socket socket, int conversationId) {
+  static void _startRhythmLoop(io.Socket socket, int conversationId, int senderId) {
     _rhythmTimer?.cancel();
 
     void emitBeatCycle() {
@@ -71,6 +73,7 @@ class HeartbeatService {
       // Lub beat at 0ms
       socket.emit('heartbeat_beat', {
         'conversationId': conversationId,
+        'senderId': senderId,
         'beatType': 'lub',
         'bpm': 75,
       });
@@ -82,6 +85,7 @@ class HeartbeatService {
         if (!_isSending) return;
         socket.emit('heartbeat_beat', {
           'conversationId': conversationId,
+          'senderId': senderId,
           'beatType': 'dub',
           'bpm': 75,
         });
@@ -106,6 +110,7 @@ class HeartbeatService {
   static void stopSending({
     required io.Socket? socket,
     required int conversationId,
+    int senderId = 1,
   }) {
     _tapBurstTimer?.cancel();
     _tapBurstTimer = null;
@@ -120,6 +125,7 @@ class HeartbeatService {
     if (socket != null && socket.connected) {
       socket.emit('heartbeat_stop', {
         'conversationId': conversationId,
+        'senderId': senderId,
       });
     }
     HeartbeatAudio.stopVibrate();
@@ -137,7 +143,7 @@ class HeartbeatService {
     socket.on('heartbeat_start', (data) {
       debugPrint('[HEARTBEAT SERVICE] Received heartbeat_start: $data');
       _isReceiving = true;
-      _activeSenderId = data != null && data['senderId'] != null ? data['senderId'] as int : null;
+      _activeSenderId = data != null && data['senderId'] != null ? (data['senderId'] as num).toInt() : null;
       if (onStateChange != null) {
         onStateChange!(true, _activeSenderId);
       }
@@ -147,7 +153,7 @@ class HeartbeatService {
       debugPrint('[HEARTBEAT SERVICE] Received heartbeat_beat: $data');
       if (!_isReceiving) {
         _isReceiving = true;
-        _activeSenderId = data != null && data['senderId'] != null ? data['senderId'] as int : null;
+        _activeSenderId = data != null && data['senderId'] != null ? (data['senderId'] as num).toInt() : null;
         if (onStateChange != null) {
           onStateChange!(true, _activeSenderId);
         }

@@ -341,8 +341,16 @@ router.get("/avatar/:userId", async (req, res) => {
       [userId]
     );
 
+    // Transparent 1x1 PNG fallback when no custom avatar is uploaded
+    const transparentPng = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+      "base64"
+    );
+
     if (userRes.rows.length === 0 || !userRes.rows[0].avatar_url) {
-      return res.status(404).json({ success: false, message: "No avatar set" });
+      res.setHeader("Content-Type", "image/png");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      return res.status(200).send(transparentPng);
     }
 
     const storedVal = userRes.rows[0].avatar_url;
@@ -350,7 +358,9 @@ router.get("/avatar/:userId", async (req, res) => {
     const filePath = path.join(uploadsDir, safeFilename);
 
     if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ success: false, message: "Avatar file not found on disk" });
+      res.setHeader("Content-Type", "image/png");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      return res.status(200).send(transparentPng);
     }
 
     const ext = path.extname(safeFilename).toLowerCase();

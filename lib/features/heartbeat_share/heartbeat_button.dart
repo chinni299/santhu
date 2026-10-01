@@ -5,12 +5,14 @@ import 'heartbeat_service.dart';
 class HeartbeatButton extends StatefulWidget {
   final io.Socket? socket;
   final int conversationId;
+  final int currentUserId;
   final bool isPartnerOnline;
 
   const HeartbeatButton({
     super.key,
     required this.socket,
     required this.conversationId,
+    this.currentUserId = 1,
     required this.isPartnerOnline,
   });
 
@@ -47,11 +49,12 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
     if (_isHolding) return;
     _pressDownTime = DateTime.now().millisecondsSinceEpoch;
 
-    debugPrint('[HEARTBEAT BUTTON] Press down triggered. Socket connected: ${widget.socket?.connected}');
+    debugPrint('[HEARTBEAT BUTTON] Press down triggered. Socket connected: ${widget.socket?.connected}, user: ${widget.currentUserId}');
 
     final started = HeartbeatService.startSending(
       socket: widget.socket,
       conversationId: widget.conversationId,
+      senderId: widget.currentUserId,
       isPartnerOnline: widget.isPartnerOnline,
       onOffline: _showOfflineSnackbar,
     );
@@ -70,13 +73,14 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
 
     if (duration < 350) {
       // Short click / Tap -> send a 3-second heartbeat burst to partner!
-      HeartbeatService.extendForTapBurst(widget.socket, widget.conversationId, 3);
+      HeartbeatService.extendForTapBurst(widget.socket, widget.conversationId, 3, widget.currentUserId);
       _showSentToast();
     } else {
       // Long press / Hold -> stop immediately when user releases
       HeartbeatService.stopSending(
         socket: widget.socket,
         conversationId: widget.conversationId,
+        senderId: widget.currentUserId,
       );
     }
 

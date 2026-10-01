@@ -3,15 +3,6 @@ import 'finger_trail_service.dart';
 import 'finger_trail_painter.dart';
 
 /// Full-screen "Touch Together" canvas overlay.
-///
-/// FIX: The previous Ticker+setState approach rebuilt the GestureDetector on
-/// every frame, which triggered Flutter's mouse_tracker assertion 199
-/// ("device not registered") during pan gestures.
-///
-/// Solution: Use AnimationController as the CustomPainter repaint listenable.
-/// The painter's paint() is called at 60fps WITHOUT ever calling setState or
-/// rebuilding the widget tree. setState is reserved only for binary UI state
-/// (partner online pill, hint text).
 class FingerTrailOverlay extends StatefulWidget {
   final int currentUserId;
   final VoidCallback onClose;
@@ -46,7 +37,7 @@ class _FingerTrailOverlayState extends State<FingerTrailOverlay>
   late final Color _myColor;
   late final Color _partnerColor;
 
-  static const double _keepMs = 2700; // prune points older than this
+  static const double _keepMs = 5000; // prune points older than 5.0 seconds
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -61,30 +52,32 @@ class _FingerTrailOverlayState extends State<FingerTrailOverlay>
         ? const Color(0xFFFF4081)
         : const Color(0xFF00E5FF);
 
-    // AnimationController running forever at vsync rate (~60fps).
-    // CustomPainter uses it as `repaint:` so only paint() is called each
-    // frame — the widget tree is NEVER rebuilt by this controller.
+    // AnimationController running at 60fps for silky smooth glowing trails
     _animCtrl = AnimationController(
       vsync: this,
       duration: const Duration(days: 365),
     )..repeat();
 
-    // Also use the controller to prune stale points each frame.
-    // Directly mutates lists — no setState needed.
     _animCtrl.addListener(_pruneExpired);
 
-    // Partner socket callbacks — direct list mutation, no setState.
+    // Partner socket callbacks
     FingerTrailService.onPartnerPoints = (points) {
-      _partnerPoints.addAll(points);
-      // No setState: painter reads live list reference each paint() call.
+      if (points.isNotEmpty) {
+        _partnerPoints.addAll(points);
+        if (!_partnerIsHere && mounted) {
+          setState(() => _partnerIsHere = true);
+        }
+      }
     };
 
-    // Only the pill / hint text need setState.
+    // Partner presence status
     FingerTrailService.onPartnerStatus = (isOpen, userId) {
-      if (mounted) setState(() => _partnerIsHere = isOpen);
+      if (mounted) {
+        setState(() => _partnerIsHere = isOpen);
+      }
     };
 
-    FingerTrailService.openOverlay();
+    FingerTrailService.openOverlay(widget.currentUserId);
   }
 
   @override
@@ -92,6 +85,8 @@ class _FingerTrailOverlayState extends State<FingerTrailOverlay>
     _animCtrl.removeListener(_pruneExpired);
     _animCtrl.dispose();
     FingerTrailService.closeOverlay();
+    FingerTrailService.onPartnerPoints = null;
+    FingerTrailService.onPartnerStatus = null;
     super.dispose();
   }
 
@@ -101,13 +96,12 @@ class _FingerTrailOverlayState extends State<FingerTrailOverlay>
     _partnerPoints.removeWhere((p) => p.timestamp < cutoff);
   }
 
-  // ── Pointer handling — never calls setState ───────────────────────────────
+  // ── Pointer handling ──────────────────────────────────────────────────────
 
   void _handlePan(Offset localPosition) {
     if (_canvasSize == Size.zero) return;
     final nx = (localPosition.dx / _canvasSize.width).clamp(0.0, 1.0);
     final ny = (localPosition.dy / _canvasSize.height).clamp(0.0, 1.0);
-    // Mutate list directly — painter reads it on the next paint() call.
     _myPoints.add(TrailPoint(
       x: nx,
       y: ny,
@@ -128,7 +122,7 @@ class _FingerTrailOverlayState extends State<FingerTrailOverlay>
           // ── Static dark gradient background ────────────────────────────
           const _Background(),
 
-          // ── Static star-field (never repaints) ─────────────────────────
+          // ── Static star-field ──────────────────────────────────────────
           const Positioned.fill(
             child: RepaintBoundary(
               child: CustomPaint(painter: _StarFieldPainter()),
@@ -136,21 +130,21 @@ class _FingerTrailOverlayState extends State<FingerTrailOverlay>
           ),
 
           // ── Gesture layer + canvas ──────────────────────────────────────
-          // LayoutBuilder only rebuilds on window resize — not every frame.
           LayoutBuilder(
             builder: (ctx, constraints) {
               _canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
               return Listener(
-                // Listener captures raw pointer events without creating a
-                // MouseRegion, which avoids the mouse_tracker assertion.
                 behavior: HitTestBehavior.opaque,
                 onPointerDown: (e) => _handlePan(e.localPosition),
                 onPointerMove: (e) => _handlePan(e.localPosition),
+                onPointerHover: (e) {
+                  if (e.buttons > 0) {
+                    _handlePan(e.localPosition);
+                  }
+                },
                 child: RepaintBoundary(
                   child: CustomPaint(
                     size: _canvasSize,
-                    // repaint: _animCtrl → paint() called at vsync rate,
-                    // build() is NEVER called by this repaint trigger.
                     painter: FingerTrailPainter(
                       myPoints: _myPoints,
                       partnerPoints: _partnerPoints,
@@ -164,27 +158,42 @@ class _FingerTrailOverlayState extends State<FingerTrailOverlay>
             },
           ),
 
-          // ── UI overlays (rebuilt only on setState for _partnerIsHere) ──
+          // ── UI overlays ────────────────────────────────────────────────
           Positioned(
             top: 0, left: 0, right: 0,
             child: _buildTopBar(context),
           ),
           Positioned(
-            bottom: 80, left: 0, right: 0,
+            bottom: 70, left: 0, right: 0,
             child: _buildLegend(),
           ),
           Positioned(
-            bottom: 36, left: 0, right: 0,
+            bottom: 28, left: 0, right: 0,
             child: Center(
-              child: Text(
-                _partnerIsHere
-                    ? 'Draw together 💕'
-                    : 'Waiting for partner to open…',
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.38),
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                  letterSpacing: 0.3,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 300),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _partnerIsHere
+                      ? Colors.tealAccent.withValues(alpha: 0.12)
+                      : Colors.white.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: _partnerIsHere
+                        ? Colors.tealAccent.withValues(alpha: 0.4)
+                        : Colors.white24,
+                  ),
+                ),
+                child: Text(
+                  _partnerIsHere
+                      ? '💖 Connected with Partner - Draw together!'
+                      : '✨ Partner auto-synced... Touch the screen to draw',
+                  style: TextStyle(
+                    color: _partnerIsHere ? const Color(0xFF64FFDA) : Colors.white70,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.3,
+                  ),
                 ),
               ),
             ),
@@ -209,7 +218,7 @@ class _FingerTrailOverlayState extends State<FingerTrailOverlay>
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [
-            Colors.black.withValues(alpha: 0.72),
+            Colors.black.withValues(alpha: 0.85),
             Colors.transparent,
           ],
         ),
@@ -220,7 +229,7 @@ class _FingerTrailOverlayState extends State<FingerTrailOverlay>
           Container(
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.08),
+              color: Colors.white.withValues(alpha: 0.12),
               shape: BoxShape.circle,
               border: Border.all(color: Colors.white24, width: 1),
             ),
@@ -240,8 +249,8 @@ class _FingerTrailOverlayState extends State<FingerTrailOverlay>
           AnimatedSwitcher(
             duration: const Duration(milliseconds: 300),
             child: _partnerIsHere
-                ? _PartnerHerePill(key: const ValueKey('here'))
-                : const SizedBox.shrink(key: ValueKey('gone')),
+                ? const _PartnerHerePill(key: ValueKey('here'))
+                : const _ConnectingPill(key: ValueKey('connecting')),
           ),
           const SizedBox(width: 12),
           GestureDetector(
@@ -249,9 +258,9 @@ class _FingerTrailOverlayState extends State<FingerTrailOverlay>
             child: Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.12),
+                color: Colors.white.withValues(alpha: 0.15),
                 shape: BoxShape.circle,
-                border: Border.all(color: Colors.white24, width: 1),
+                border: Border.all(color: Colors.white30, width: 1),
               ),
               child: const Icon(Icons.close_rounded, color: Colors.white, size: 20),
             ),
@@ -266,7 +275,7 @@ class _FingerTrailOverlayState extends State<FingerTrailOverlay>
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         _LegendDot(color: _myColor, label: 'You'),
-        const SizedBox(width: 20),
+        const SizedBox(width: 24),
         _LegendDot(color: _partnerColor, label: 'Partner'),
       ],
     );
@@ -285,7 +294,7 @@ class _Background extends StatelessWidget {
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFF0A0F1E), Color(0xFF0D1B2A), Color(0xFF12082A)],
+          colors: [Color(0xFF070B18), Color(0xFF0F172A), Color(0xFF130924)],
         ),
       ),
     );
@@ -302,10 +311,10 @@ class _PartnerHerePill extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
       decoration: BoxDecoration(
-        color: Colors.greenAccent.withValues(alpha: 0.12),
+        color: const Color(0xFF00E676).withValues(alpha: 0.18),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-            color: Colors.greenAccent.withValues(alpha: 0.45), width: 1),
+            color: const Color(0xFF00E676).withValues(alpha: 0.6), width: 1),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -314,17 +323,55 @@ class _PartnerHerePill extends StatelessWidget {
             width: 7,
             height: 7,
             decoration: const BoxDecoration(
-              color: Colors.greenAccent,
+              color: Color(0xFF00E676),
               shape: BoxShape.circle,
             ),
           ),
           const SizedBox(width: 6),
           const Text(
-            'Partner is here',
+            'Partner Live',
             style: TextStyle(
-              color: Colors.greenAccent,
-              fontSize: 11.5,
+              color: Color(0xFF00E676),
+              fontSize: 12,
               fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ConnectingPill extends StatelessWidget {
+  const _ConnectingPill({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.amber.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.amber.withValues(alpha: 0.4), width: 1),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 8,
+            height: 8,
+            child: CircularProgressIndicator(
+              strokeWidth: 1.5,
+              color: Colors.amber,
+            ),
+          ),
+          SizedBox(width: 6),
+          Text(
+            'Live Sync',
+            style: TextStyle(
+              color: Colors.amber,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ],
@@ -347,13 +394,23 @@ class _LegendDot extends StatelessWidget {
         Container(
           width: 10,
           height: 10,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: color.withValues(alpha: 0.6),
+                blurRadius: 6,
+                spreadRadius: 1,
+              ),
+            ],
+          ),
         ),
         const SizedBox(width: 6),
         Text(
           label,
           style: TextStyle(
-            color: Colors.white.withValues(alpha: 0.5),
+            color: Colors.white.withValues(alpha: 0.8),
             fontSize: 12,
             fontWeight: FontWeight.w600,
           ),
@@ -363,20 +420,24 @@ class _LegendDot extends StatelessWidget {
   }
 }
 
-// ─── Static decorative star-field ─────────────────────────────────────────────
-
 class _StarFieldPainter extends CustomPainter {
   const _StarFieldPainter();
 
-  static final List<Offset> _stars = List.generate(80, (i) {
-    return Offset((i * 137.5) % 1.0, (i * 31.7 + 0.3) % 1.0);
-  });
-
   @override
   void paint(Canvas canvas, Size size) {
-    final p = Paint()..color = Colors.white.withValues(alpha: 0.08);
-    for (final s in _stars) {
-      canvas.drawCircle(Offset(s.dx * size.width, s.dy * size.height), 1.2, p);
+    final starPaint = Paint()..color = Colors.white.withValues(alpha: 0.35);
+    final offsets = [
+      Offset(size.width * 0.15, size.height * 0.12),
+      Offset(size.width * 0.82, size.height * 0.18),
+      Offset(size.width * 0.35, size.height * 0.28),
+      Offset(size.width * 0.65, size.height * 0.42),
+      Offset(size.width * 0.08, size.height * 0.55),
+      Offset(size.width * 0.88, size.height * 0.68),
+      Offset(size.width * 0.22, size.height * 0.78),
+      Offset(size.width * 0.50, size.height * 0.88),
+    ];
+    for (final off in offsets) {
+      canvas.drawCircle(off, 1.2, starPaint);
     }
   }
 

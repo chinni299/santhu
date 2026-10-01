@@ -36,6 +36,9 @@ import '../features/heartbeat_share/heartbeat_overlay.dart';
 import '../features/heartbeat_share/heartbeat_service.dart';
 import '../features/finger_trail/finger_trail_service.dart';
 import '../features/finger_trail/finger_trail_overlay.dart';
+import '../features/shared_sky/shared_sky_screen.dart';
+import '../features/hug_kiss/hug_kiss_service.dart';
+import '../features/hug_kiss/hug_kiss_overlay.dart';
 
 
 class ChatScreen extends StatefulWidget {
@@ -79,6 +82,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // Finger Trail (Touch Together) State
   bool _showFingerTrail = false;
+
+  // Hug & Kiss State
+  HugData? _currentReceivedHug;
+  bool _showKissSyncModal = false;
 
   // Emoji Picker State
   bool _showEmojiPicker = false;
@@ -141,9 +148,23 @@ class _ChatScreenState extends State<ChatScreen> {
   String peerAvatarUrl = '';
   bool _hasLoggedOffline = false;
 
+  late int _activeUserId;
+  int get currentUserId => _activeUserId;
+  int get otherUserId => _activeUserId == 1 ? 2 : 1;
+
+  bool _isMessageFromMe(Map<String, dynamic> message) {
+    if (message['isMe'] == true) return true;
+    final dynamic rawSender = message['sender_id'] ?? message['senderId'];
+    if (rawSender == null) return false;
+    final sStr = rawSender.toString().trim();
+    final uStr = currentUserId.toString().trim();
+    return sStr.isNotEmpty && uStr.isNotEmpty && sStr == uStr;
+  }
+
   @override
   void initState() {
     super.initState();
+    _activeUserId = widget.currentUserId;
 
     _focusNode.addListener(() {
       if (_focusNode.hasFocus) {
@@ -158,9 +179,23 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) setState(() {});
     });
 
-    _loadPeerProfile();
-    _loadAuthHeaders();
-    _initE2EE();
+    _initChatSession();
+  }
+
+  Future<void> _initChatSession() async {
+    final user = await AuthService.getUser();
+    final parsedId = int.tryParse((user['id'] ?? '').toString());
+    if (parsedId != null && parsedId > 0 && parsedId != _activeUserId) {
+      if (mounted) {
+        setState(() {
+          _activeUserId = parsedId;
+        });
+      }
+    }
+
+    await _loadPeerProfile();
+    await _loadAuthHeaders();
+    await _initE2EE();
     fetchMessages(showLoading: messages.isEmpty);
     _initSocket();
     if (!kIsWeb) {
@@ -172,15 +207,15 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _loadPeerProfile() async {
-    final otherUserId = widget.currentUserId == 1 ? 2 : 1;
-    final cachedAlias = await AuthService.getContactAlias(otherUserId, widget.currentUserId);
+    final otherUserId = currentUserId == 1 ? 2 : 1;
+    final cachedAlias = await AuthService.getContactAlias(otherUserId, currentUserId);
     if (cachedAlias != null && cachedAlias.isNotEmpty && mounted) {
       setState(() {
         peerDisplayName = cachedAlias;
       });
     }
 
-    final profile = await AuthService.getPeerUserProfile(otherUserId, widget.currentUserId);
+    final profile = await AuthService.getPeerUserProfile(otherUserId, currentUserId);
     if (mounted) {
       setState(() {
         peerDisplayName = profile['display_name'] ?? (otherUserId == 2 ? 'Leslie' : 'User $otherUserId');
@@ -195,7 +230,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _showEditContactNameDialog() {
-    final otherUserId = widget.currentUserId == 1 ? 2 : 1;
+    final otherUserId = currentUserId == 1 ? 2 : 1;
     final nameController = TextEditingController(text: peerDisplayName);
 
     showDialog(
@@ -243,7 +278,7 @@ class _ChatScreenState extends State<ChatScreen> {
               onPressed: () async {
                 final newName = nameController.text.trim();
                 if (newName.isNotEmpty) {
-                  await AuthService.saveContactAlias(otherUserId, newName, widget.currentUserId);
+                  await AuthService.saveContactAlias(otherUserId, newName, currentUserId);
                   if (mounted) {
                     setState(() {
                       peerDisplayName = newName;
@@ -273,14 +308,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _initE2EE() async {
     try {
-      await EncryptionService().initKeyPair(widget.currentUserId);
-      await AuthService.registerPublicKey(widget.currentUserId);
+      await EncryptionService().initKeyPair(currentUserId);
+      await AuthService.registerPublicKey(currentUserId);
 
-      final peerUserId = widget.currentUserId == 1 ? 2 : 1;
-      final peerPubKey = await AuthService.getPeerPublicKey(peerUserId, widget.currentUserId);
+      final peerUserId = currentUserId == 1 ? 2 : 1;
+      final peerPubKey = await AuthService.getPeerPublicKey(peerUserId, currentUserId);
 
       if (peerPubKey != null && peerPubKey.isNotEmpty) {
-        final sharedKey = await EncryptionService().getSharedKey(peerPubKey, widget.currentUserId);
+        final sharedKey = await EncryptionService().getSharedKey(peerPubKey, currentUserId);
         if (mounted) {
           setState(() {
             _sharedSecretKey = sharedKey;
@@ -358,7 +393,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
 
   Future<void> _loadAuthHeaders() async {
-    final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
+    final headers = await AuthService.getAuthHeadersForUser(currentUserId);
     if (mounted) {
       setState(() {
         _authHeaders = headers;
@@ -409,7 +444,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (isLocalFile && !kIsWeb) {
         bytes = await File(imageUrl).readAsBytes();
       } else {
-        final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
+        final headers = await AuthService.getAuthHeadersForUser(currentUserId);
         final res = await http.get(Uri.parse(imageUrl), headers: headers);
         if (res.statusCode == 200) {
           bytes = res.bodyBytes;
@@ -641,7 +676,7 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
 
-      final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
+      final headers = await AuthService.getAuthHeadersForUser(currentUserId);
 
       if (!kIsWeb) {
         final response = await http.get(Uri.parse(formattedUrl), headers: headers);
@@ -711,7 +746,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Fetch and decrypt encrypted media bytes; returns plaintext Uint8List.
   Future<Uint8List> _fetchAndDecryptMediaBytes(String url, String nonce) async {
-    final headers = _authHeaders.isNotEmpty ? _authHeaders : await AuthService.getAuthHeadersForUser(widget.currentUserId);
+    final headers = _authHeaders.isNotEmpty ? _authHeaders : await AuthService.getAuthHeadersForUser(currentUserId);
     final response = await http.get(Uri.parse(url), headers: headers);
     if (response.statusCode != 200) {
       throw Exception('Failed to fetch encrypted media (${response.statusCode})');
@@ -848,7 +883,7 @@ class _ChatScreenState extends State<ChatScreen> {
     socket?.emit('reactToMessage', {
       'conversationId': widget.conversationId,
       'messageId': messageId,
-      'userId': widget.currentUserId,
+      'userId': currentUserId,
       'emoji': emoji,
     });
     // Optimistic local update — server will confirm/correct via messageReaction event
@@ -858,7 +893,7 @@ class _ChatScreenState extends State<ChatScreen> {
         if (msg['id'] != null && msg['id'].toString() == messageId.toString()) {
           final Map<String, dynamic> reactions =
               msg['reactions'] is Map ? Map<String, dynamic>.from(msg['reactions']) : {};
-          final String userKey = widget.currentUserId.toString();
+          final String userKey = currentUserId.toString();
           if (reactions[userKey] == emoji) {
             reactions.remove(userKey); // toggle off
           } else {
@@ -877,7 +912,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // ==================================================
   Future<void> _checkOnThisDayMemories() async {
     try {
-      final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
+      final headers = await AuthService.getAuthHeadersForUser(currentUserId);
       final response = await http.get(
         Uri.parse('$baseUrl/messages/on-this-day/${widget.conversationId}'),
         headers: headers,
@@ -900,7 +935,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _showOnThisDayDialog() {
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -919,7 +954,7 @@ class _ChatScreenState extends State<ChatScreen> {
             itemCount: onThisDayMemories.length,
             itemBuilder: (context, index) {
               final mem = onThisDayMemories[index];
-              final isMe = int.tryParse((mem['sender_id'] ?? '').toString()) == widget.currentUserId;
+              final isMe = int.tryParse((mem['sender_id'] ?? '').toString()) == currentUserId;
               final year = mem['year_sent']?.toString() ?? '';
               final nowYear = DateTime.now().year;
               final yearsAgo = year.isNotEmpty ? (nowYear - int.parse(year)) : null;
@@ -978,8 +1013,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> fetchOtherUserStatus() async {
     try {
-      final otherUserId = widget.currentUserId == 1 ? 2 : 1;
-      final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
+      final otherUserId = currentUserId == 1 ? 2 : 1;
+      final headers = await AuthService.getAuthHeadersForUser(currentUserId);
       final response = await http.get(
         Uri.parse('$baseUrl/messages/user-status/$otherUserId'),
         headers: headers,
@@ -1120,7 +1155,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // socket?.io.options?['auth'] does NOT work in socket_io_client v3 on
   // Flutter Web â€” the server always sees no token and rejects with 401.
   Future<void> _initSocket() async {
-    final token = await AuthService.ensureToken(widget.currentUserId);
+    final token = await AuthService.ensureToken(currentUserId);
 
     if (token == null || token.isEmpty) {
       debugPrint('âš  Chat: Could not obtain token â€” running in local mode');
@@ -1144,8 +1179,8 @@ class _ChatScreenState extends State<ChatScreen> {
       debugPrint('[CHAT SOCKET] JOINING ROOM: ${widget.conversationId}');
       socket?.emit('joinConversation', {
         'conversationId': widget.conversationId,
-        'userId': widget.currentUserId,
-        'userName': widget.currentUserId == 1 ? 'User 1' : 'User 2',
+        'userId': currentUserId,
+        'userName': currentUserId == 1 ? 'User 1' : 'User 2',
       });
       _markDelivered();
       _markSeen();
@@ -1173,7 +1208,31 @@ class _ChatScreenState extends State<ChatScreen> {
     };
 
     // Initialize Finger Trail (Touch Together) Service
-    FingerTrailService.initialize(socket, widget.conversationId);
+    FingerTrailService.initialize(socket, widget.conversationId, currentUserId);
+    FingerTrailService.onGlobalPartnerStatus = (isOpen, userId) {
+      if (!mounted) return;
+      if (isOpen && !_showFingerTrail) {
+        setState(() => _showFingerTrail = true);
+      }
+    };
+
+    // Initialize Hug & Kiss Sync Service
+    HugKissService.initialize(
+      socket: socket,
+      conversationId: widget.conversationId,
+      currentUserId: currentUserId,
+    );
+    HugKissService.onHugReceived = (hug) {
+      if (mounted) {
+        setState(() => _currentReceivedHug = hug);
+      }
+    };
+    // Fetch any undelivered offline hugs stored in PostgreSQL
+    HugKissService.fetchPendingHugs().then((pending) {
+      if (pending.isNotEmpty && mounted) {
+        setState(() => _currentReceivedHug = pending.first);
+      }
+    });
 
     socket?.onConnectError((err) {
       debugPrint('[CHAT SOCKET] CONNECT ERROR: $err');
@@ -1218,6 +1277,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
       final newMessageMap = {
         'id': messageId,
+        'sender_id': senderId,
+        'senderId': senderId,
         'message': decryptedText,
         'rawMessage': rawText,
         'nonce': nonce,
@@ -1241,8 +1302,8 @@ class _ChatScreenState extends State<ChatScreen> {
         'reply_attachment_name': replyAttachmentName,
         'replyIsDeleted': replyIsDeleted,
         'reply_is_deleted': replyIsDeleted,
-        // Strict message ownership based on senderId
-        'isMe': senderId != null && int.parse(senderId.toString()) == widget.currentUserId,
+        // Strict message ownership based on normalized helper
+        'isMe': _isMessageFromMe({'sender_id': senderId, 'senderId': senderId}),
         'isDelivered': data['is_delivered'] == true || data['isDelivered'] == true || isRead,
         'is_delivered': data['is_delivered'] == true || data['isDelivered'] == true || isRead,
         'isRead': isRead,
@@ -1317,7 +1378,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
       debugPrint("=== SOCKET MESSAGE CHECK ===");
       debugPrint("Message ID: ${newMessageMap['id']}");
-      debugPrint("currentUserId: ${widget.currentUserId}");
+      debugPrint("currentUserId: $currentUserId");
       debugPrint("sender_id (raw): ${data['sender_id']}");
       debugPrint("senderId (raw): ${data['senderId']}");
       debugPrint("isMe: ${newMessageMap['isMe']}");
@@ -1325,7 +1386,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
       _scrollToBottom();
 
-      if (senderId != null && int.parse(senderId.toString()) != widget.currentUserId) {
+      if (senderId != null && int.parse(senderId.toString()) != currentUserId) {
         _markDelivered();
         _markSeen();
       }
@@ -1335,7 +1396,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (data == null) return;
 
       final readerId = data['readerId'] ?? data['reader_id'];
-      if (readerId != null && int.parse(readerId.toString()) == widget.currentUserId) return;
+      if (readerId != null && int.parse(readerId.toString()) == currentUserId) return;
 
       final List? seenIds = data['seenMessageIds'];
 
@@ -1362,7 +1423,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (data == null) return;
 
       final recipientId = data['recipientId'] ?? data['recipient_id'];
-      if (recipientId != null && int.parse(recipientId.toString()) == widget.currentUserId) return;
+      if (recipientId != null && int.parse(recipientId.toString()) == currentUserId) return;
 
       final List? deliveredIds = data['deliveredMessageIds'];
 
@@ -1445,7 +1506,7 @@ class _ChatScreenState extends State<ChatScreen> {
     socket?.on('typing', (data) {
       if (data == null) return;
       final senderId = data['senderId'] ?? data['sender_id'];
-      if (senderId != null && int.parse(senderId.toString()) == widget.currentUserId) return;
+      if (senderId != null && int.parse(senderId.toString()) == currentUserId) return;
 
       final name = data['userName'] ?? (senderId != null && int.parse(senderId.toString()) == 1 ? 'User 1' : 'User 2');
 
@@ -1459,7 +1520,7 @@ class _ChatScreenState extends State<ChatScreen> {
     socket?.on('stopTyping', (data) {
       if (data == null) return;
       final senderId = data['senderId'] ?? data['sender_id'];
-      if (senderId != null && int.parse(senderId.toString()) == widget.currentUserId) return;
+      if (senderId != null && int.parse(senderId.toString()) == currentUserId) return;
 
       if (!mounted) return;
       setState(() {
@@ -1471,7 +1532,7 @@ class _ChatScreenState extends State<ChatScreen> {
     socket?.on('userOnline', (data) {
       if (data == null) return;
       final userId = data['userId'] ?? data['user_id'];
-      if (userId != null && int.parse(userId.toString()) == widget.currentUserId) return;
+      if (userId != null && int.parse(userId.toString()) == currentUserId) return;
 
       if (!mounted) return;
       setState(() {
@@ -1590,7 +1651,7 @@ class _ChatScreenState extends State<ChatScreen> {
     socket?.on('userOffline', (data) {
       if (data == null) return;
       final userId = data['userId'] ?? data['user_id'];
-      if (userId != null && int.parse(userId.toString()) == widget.currentUserId) return;
+      if (userId != null && int.parse(userId.toString()) == currentUserId) return;
 
       final rawLastSeen = data['lastSeenAt'] ?? data['last_seen_at'];
 
@@ -1616,14 +1677,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
       if (!mounted) return;
 
-      if (userId != null && int.parse(userId.toString()) == widget.currentUserId) {
+      if (userId != null && int.parse(userId.toString()) == currentUserId) {
         setState(() {
           unreadCount = 0;
         });
         return;
       }
 
-      if (senderId != null && int.parse(senderId.toString()) != widget.currentUserId) {
+      if (senderId != null && int.parse(senderId.toString()) != currentUserId) {
         final count = data['unreadCount'];
         if (count != null) {
           setState(() {
@@ -1638,7 +1699,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final convId = data['conversationId'];
       if (convId != null && convId.toString() != widget.conversationId.toString()) return;
 
-      final callerName = data['callerName'] ?? (peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? "User 2" : "User 1"));
+      final callerName = data['callerName'] ?? (peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? "User 2" : "User 1"));
       final isVideoCall = data['isVideoCall'] == true;
 
       if (!mounted) return;
@@ -1702,14 +1763,14 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _openCallScreen({required bool isVideoCall, required bool isCaller}) {
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? "User 2" : "User 1");
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? "User 2" : "User 1");
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (ctx) => CallScreen(
           socket: socket,
           conversationId: widget.conversationId,
-          currentUserId: widget.currentUserId,
+          currentUserId: currentUserId,
           peerName: otherUserName,
           isVideoCall: isVideoCall,
           isCaller: isCaller,
@@ -1721,7 +1782,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _markSeen() {
     socket?.emit('markMessagesSeen', {
       'conversationId': widget.conversationId,
-      'userId': widget.currentUserId,
+      'userId': currentUserId,
     });
     if (mounted) {
       setState(() {
@@ -1733,7 +1794,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _markDelivered() {
     socket?.emit('markMessagesDelivered', {
       'conversationId': widget.conversationId,
-      'userId': widget.currentUserId,
+      'userId': currentUserId,
     });
   }
 
@@ -1747,8 +1808,8 @@ class _ChatScreenState extends State<ChatScreen> {
       _isEmittingTyping = true;
       socket?.emit('typing', {
         'conversationId': widget.conversationId,
-        'senderId': widget.currentUserId,
-        'userName': widget.currentUserId == 1 ? 'User 1' : 'User 2',
+        'senderId': currentUserId,
+        'userName': currentUserId == 1 ? 'User 1' : 'User 2',
       });
     }
 
@@ -1764,7 +1825,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _isEmittingTyping = false;
       socket?.emit('stopTyping', {
         'conversationId': widget.conversationId,
-        'senderId': widget.currentUserId,
+        'senderId': currentUserId,
       });
     }
   }
@@ -1917,7 +1978,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _showThreeDotsMenu() {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
 
     showModalBottomSheet(
       context: context,
@@ -1957,7 +2018,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         builder: (_) => SpecialDatesScreen(
                           socket: socket,
                           conversationId: widget.conversationId,
-                          currentUserId: widget.currentUserId,
+                          currentUserId: currentUserId,
                         ),
                       ),
                     );
@@ -1974,8 +2035,8 @@ class _ChatScreenState extends State<ChatScreen> {
                       MaterialPageRoute(
                         builder: (_) => CallHistoryScreen(
                           conversationId: widget.conversationId,
-                          currentUserId: widget.currentUserId,
-                          peerName: peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'User 2' : 'User 1'),
+                          currentUserId: currentUserId,
+                          peerName: peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'User 2' : 'User 1'),
                         ),
                       ),
                     );
@@ -2175,7 +2236,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
 
       if (pickedBytes != null) {
-        final otherUserId = widget.currentUserId == 1 ? 2 : 1;
+        final otherUserId = currentUserId == 1 ? 2 : 1;
         final base64Image = 'data:image/jpeg;base64,${base64Encode(pickedBytes)}';
         await AuthService.saveAvatarPath(base64Image, otherUserId);
 
@@ -2205,7 +2266,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _showContactInfo() {
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
     final mediaCount = messages.where((m) => m['attachmentType'] == 'image').length;
     final fileCount = messages.where((m) => m['attachmentType'] == 'file').length;
 
@@ -2337,9 +2398,9 @@ class _ChatScreenState extends State<ChatScreen> {
                     context,
                     MaterialPageRoute(
                       builder: (_) => MediaGalleryScreen(
-                        currentUserId: widget.currentUserId,
+                        currentUserId: currentUserId,
                         conversationId: widget.conversationId,
-                        peerName: peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1'),
+                        peerName: peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1'),
                       ),
                     ),
                   );
@@ -2491,7 +2552,7 @@ class _ChatScreenState extends State<ChatScreen> {
       socket?.emit('toggleVanishMode', {
         'conversationId': widget.conversationId,
         'isVanishMode': isVanishMode,
-        'senderId': widget.currentUserId,
+        'senderId': currentUserId,
       });
     } catch (_) {}
 
@@ -2627,7 +2688,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       isFavourite = !isFavourite;
     });
-    final otherUserName = widget.currentUserId == 1 ? 'Leslie' : 'User 1';
+    final otherUserName = currentUserId == 1 ? 'Leslie' : 'User 1';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(isFavourite ? 'Added $otherUserName to Favourites â¤ï¸' : 'Removed $otherUserName from Favourites'),
@@ -2663,7 +2724,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _exportChatTranscript() {
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
     final StringBuffer transcript = StringBuffer();
     transcript.writeln("=== Clock History Export ===");
     transcript.writeln("Participant: $otherUserName");
@@ -2713,7 +2774,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _showSafetyNumberDialog() async {
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -2727,7 +2788,7 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         content: FutureBuilder<http.Response>(
           future: () async {
-            final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
+            final headers = await AuthService.getAuthHeadersForUser(currentUserId);
             return http.get(Uri.parse('$baseUrl/auth/safety-number/${widget.conversationId}'), headers: headers);
           }(),
           builder: (context, snapshot) {
@@ -2994,7 +3055,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _startNewGroupCall() {
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
 
     showDialog(
       context: context,
@@ -3090,7 +3151,7 @@ class _ChatScreenState extends State<ChatScreen> {
         Uri.parse('$baseUrl/auth/fcm-token'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
-          'userId': widget.currentUserId,
+          'userId': currentUserId,
           'fcmToken': token,
         }),
       );
@@ -3108,7 +3169,7 @@ class _ChatScreenState extends State<ChatScreen> {
           context,
           MaterialPageRoute(
             builder: (_) => ChatScreen(
-              currentUserId: widget.currentUserId,
+              currentUserId: currentUserId,
               conversationId: targetConvId,
             ),
           ),
@@ -3119,9 +3180,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> fetchUnreadCount() async {
     try {
-      final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
+      final headers = await AuthService.getAuthHeadersForUser(currentUserId);
       final response = await http.get(
-        Uri.parse('$baseUrl/messages/unread-count/${widget.conversationId}/${widget.currentUserId}'),
+        Uri.parse('$baseUrl/messages/unread-count/${widget.conversationId}/$currentUserId'),
         headers: headers,
       );
 
@@ -3135,7 +3196,7 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       }
     } catch (e) {
-      // Silent Î“Ã‡Ã¶ server may be offline
+      // Silent – server may be offline
     }
   }
 
@@ -3151,7 +3212,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     try {
-      var headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
+      var headers = await AuthService.getAuthHeadersForUser(currentUserId);
       var response = await http.get(
         Uri.parse('$baseUrl/messages/${widget.conversationId}'),
         headers: headers,
@@ -3159,10 +3220,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
       // Auto-retry if token is invalid or expired
       if (response.statusCode == 401 || response.statusCode == 403) {
-        final email = widget.currentUserId == 1 ? 'user1@example.com' : 'user2@example.com';
+        final email = currentUserId == 1 ? 'user1@example.com' : 'user2@example.com';
         final loginRes = await AuthService.login(email, 'password123');
         if (loginRes['success'] == true && loginRes['token'] != null) {
-          headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
+          headers = await AuthService.getAuthHeadersForUser(currentUserId);
           response = await http.get(
             Uri.parse('$baseUrl/messages/${widget.conversationId}'),
             headers: headers,
@@ -3218,6 +3279,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
             parsedMessages.add({
               'id': msgId,
+              'sender_id': item['sender_id'] ?? item['senderId'],
+              'senderId': item['sender_id'] ?? item['senderId'],
               'message': decryptedText,
               'rawMessage': rawText,
               'nonce': nonce,
@@ -3241,8 +3304,7 @@ class _ChatScreenState extends State<ChatScreen> {
               'reply_attachment_name': replyAttachmentName,
               'replyIsDeleted': replyIsDeleted,
               'reply_is_deleted': replyIsDeleted,
-              'isMe': (item['sender_id'] ?? item['senderId']) != null &&
-                     int.parse((item['sender_id'] ?? item['senderId']).toString()) == widget.currentUserId,
+              'isMe': _isMessageFromMe(item),
               'isDelivered': isDelivered,
               'is_delivered': isDelivered,
               'isRead': isRead,
@@ -3261,7 +3323,7 @@ class _ChatScreenState extends State<ChatScreen> {
           if (parsedMessages.isNotEmpty) {
             final testMsg = parsedMessages.last;
             debugPrint("Message ID: ${testMsg['id']}");
-            debugPrint("currentUserId: ${widget.currentUserId}");
+            debugPrint("currentUserId: $currentUserId");
             debugPrint("sender_id (raw): ${fetchedData.last['sender_id']}");
             debugPrint("senderId (raw): ${fetchedData.last['senderId']}");
             debugPrint("isMe: ${testMsg['isMe']}");
@@ -3618,8 +3680,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
       final tempLocationMsg = {
         'id': tempMsgId,
-        'senderId': widget.currentUserId,
-        'sender_id': widget.currentUserId,
+        'senderId': currentUserId,
+        'sender_id': currentUserId,
         'message': payload,
         'attachmentType': 'location',
         'attachment_type': 'location',
@@ -3830,7 +3892,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final tempMessageMap = {
       'id': tempMsgId,
-      'senderId': widget.currentUserId,
+      'senderId': currentUserId,
       'message': caption,
       'attachmentUrl': filePath ?? fileName,
       'isLocalFile': true,
@@ -3854,7 +3916,7 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final uri = Uri.parse('$baseUrl/messages/upload');
       final request = http.MultipartRequest('POST', uri);
-      final token = await AuthService.getTokenForUser(widget.currentUserId);
+      final token = await AuthService.getTokenForUser(currentUserId);
       if (token != null && token.isNotEmpty) {
         request.headers['Authorization'] = 'Bearer $token';
       }
@@ -3865,7 +3927,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
 
       request.fields['conversationId'] = widget.conversationId.toString();
-      request.fields['senderId'] = widget.currentUserId.toString();
+      request.fields['senderId'] = currentUserId.toString();
       request.fields['attachmentType'] = attachmentType;
 
       // ── E2EE: encrypt caption (text) ──────────────────────────────────────
@@ -3963,7 +4025,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
           socket?.emit('sendMessage', {
             'conversationId': widget.conversationId,
-            'senderId': widget.currentUserId,
+            'senderId': currentUserId,
             'message': sendText,                  // ciphertext (or plaintext if no key)
             'attachmentUrl': msgData['attachment_url'],
             'attachmentType': attachmentType,     // original type so recipient knows
@@ -4063,6 +4125,51 @@ class _ChatScreenState extends State<ChatScreen> {
                         debugPrint("LOCATION OPTION CLICKED");
                         Navigator.pop(ctx);
                         _showLocationShareSheet();
+                      },
+                    ),
+                    _buildAttachmentGridItem(
+                      icon: Icons.auto_awesome_rounded,
+                      label: "Our Sky",
+                      color: const Color(0xFF6366F1),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => SharedSkyScreen(
+                              conversationId: widget.conversationId,
+                              currentUserId: currentUserId,
+                              partnerName: peerDisplayName.isNotEmpty ? peerDisplayName : 'Partner',
+                              socket: socket,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                    _buildAttachmentGridItem(
+                      icon: Icons.volunteer_activism_rounded,
+                      label: "Send Hug",
+                      color: const Color(0xFFF59E0B),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        HugKissService.sendHug();
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: const Text('Warm hug sent! 🤗💖'),
+                            backgroundColor: const Color(0xFFD97706),
+                            behavior: SnackBarBehavior.floating,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                        );
+                      },
+                    ),
+                    _buildAttachmentGridItem(
+                      icon: Icons.favorite_rounded,
+                      label: "Kiss Sync",
+                      color: const Color(0xFFE11D48),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        setState(() => _showKissSyncModal = true);
                       },
                     ),
                   ],
@@ -4183,7 +4290,7 @@ class _ChatScreenState extends State<ChatScreen> {
               socket?.emit('deleteMessage', {
                 'conversationId': widget.conversationId,
                 'messageId': messageMap['id'],
-                'senderId': widget.currentUserId,
+                'senderId': currentUserId,
               });
             },
             child: const Text("Delete"),
@@ -4212,7 +4319,7 @@ class _ChatScreenState extends State<ChatScreen> {
       socket?.emit('editMessage', {
         'conversationId': widget.conversationId,
         'messageId': editingMessageId,
-        'senderId': widget.currentUserId,
+        'senderId': currentUserId,
         'newMessage': encResult['ciphertext'],
         'nonce': encResult['nonce'],
         'isEncrypted': canEncrypt,
@@ -4243,7 +4350,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
       final optimisticMsg = {
         'id': tempMsgId,
-        'senderId': widget.currentUserId,
+        'senderId': currentUserId,
         'message': text,
         'rawMessage': encResult['ciphertext'],
         'nonce': encResult['nonce'],
@@ -4278,7 +4385,7 @@ class _ChatScreenState extends State<ChatScreen> {
       debugPrint('[CHAT SOCKET] SEND MESSAGE (canEncrypt=$canEncrypt)');
       socket?.emit('sendMessage', {
         'conversationId': widget.conversationId,
-        'senderId': widget.currentUserId,
+        'senderId': currentUserId,
         'message': encResult['ciphertext'],
         'nonce': encResult['nonce'],
         'isEncrypted': canEncrypt,
@@ -4295,7 +4402,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
 
     final Color scaffoldBg = isVanishMode
         ? const Color(0xFF0D0B14)
@@ -4398,7 +4505,12 @@ class _ChatScreenState extends State<ChatScreen> {
               ClipPath(
                 clipper: WaveHeaderClipper(),
                 child: Container(
-                  padding: const EdgeInsets.only(top: 45, left: 16, right: 16, bottom: 6),
+                  padding: EdgeInsets.only(
+                    top: MediaQuery.of(context).padding.top + 6,
+                    left: 4,
+                    right: 4,
+                    bottom: 10,
+                  ),
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
                       colors: isVanishMode
@@ -4409,6 +4521,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ),
                   child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       // Back button
                       IconButton(
@@ -4418,7 +4531,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         onPressed: () => Navigator.pop(context),
                       ),
                       const SizedBox(width: 2),
-                      // Peer info (takes all remaining space)
+                      // Peer info (Avatar + Name + Status)
                       Expanded(
                         child: GestureDetector(
                           onTap: _showContactInfo,
@@ -4426,9 +4539,10 @@ class _ChatScreenState extends State<ChatScreen> {
                           child: Row(
                             children: [
                               Stack(
+                                clipBehavior: Clip.none,
                                 children: [
                                   CircleAvatar(
-                                    radius: 17,
+                                    radius: 18,
                                     backgroundColor: Colors.white24,
                                     backgroundImage: _getAvatarImageProvider(peerAvatarPath, peerAvatarUrl),
                                     child: _getAvatarImageProvider(peerAvatarPath, peerAvatarUrl) == null
@@ -4447,8 +4561,8 @@ class _ChatScreenState extends State<ChatScreen> {
                                       right: 0,
                                       bottom: 0,
                                       child: Container(
-                                        width: 9,
-                                        height: 9,
+                                        width: 10,
+                                        height: 10,
                                         decoration: BoxDecoration(
                                           color: const Color(0xFF00E676),
                                           shape: BoxShape.circle,
@@ -4458,10 +4572,10 @@ class _ChatScreenState extends State<ChatScreen> {
                                     ),
                                 ],
                               ),
-                              const SizedBox(width: 7),
+                              const SizedBox(width: 8),
                               Expanded(
                                 child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  mainAxisSize: MainAxisSize.min,
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Row(
@@ -4474,16 +4588,17 @@ class _ChatScreenState extends State<ChatScreen> {
                                             overflow: TextOverflow.ellipsis,
                                             style: const TextStyle(
                                               fontSize: 15,
-                                              fontWeight: FontWeight.w900,
+                                              fontWeight: FontWeight.w800,
                                               color: Colors.white,
-                                              letterSpacing: 0.1,
+                                              letterSpacing: 0.2,
                                             ),
                                           ),
                                         ),
-                                        const SizedBox(width: 3),
+                                        const SizedBox(width: 4),
                                         const Icon(Icons.verified_rounded, color: Colors.white70, size: 14),
                                       ],
                                     ),
+                                    const SizedBox(height: 1),
                                     Text(
                                       isOtherUserTyping
                                           ? typingText
@@ -4495,7 +4610,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                         color: isOtherUserTyping
                                             ? const Color(0xFFFFE082)
                                             : (isOtherUserOnline ? const Color(0xFFA7FFEB) : Colors.white70),
-                                        fontWeight: FontWeight.w700,
+                                        fontWeight: FontWeight.w600,
                                       ),
                                     ),
                                   ],
@@ -4505,27 +4620,30 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                         ),
                       ),
-                       IconButton(
-                         padding: EdgeInsets.zero,
-                         constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                         icon: const Icon(Icons.call_rounded, color: Colors.white, size: 19),
-                         tooltip: 'Audio Call',
-                         onPressed: () => _openCallScreen(isVideoCall: false, isCaller: true),
-                       ),
-                       IconButton(
-                         padding: EdgeInsets.zero,
-                         constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                         icon: const Icon(Icons.videocam_rounded, color: Colors.white, size: 20),
-                         tooltip: 'Video Call',
-                         onPressed: () => _openCallScreen(isVideoCall: true, isCaller: true),
-                       ),
-                       IconButton(
-                         padding: EdgeInsets.zero,
-                         constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
-                         icon: const Icon(Icons.more_vert_rounded, color: Colors.white, size: 22),
-                         tooltip: 'Menu',
-                         onPressed: _showThreeDotsMenu,
-                       ),
+                      // Audio Call button
+                      IconButton(
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                        icon: const Icon(Icons.call_rounded, color: Colors.white, size: 20),
+                        tooltip: 'Audio Call',
+                        onPressed: () => _openCallScreen(isVideoCall: false, isCaller: true),
+                      ),
+                      // Video Call button
+                      IconButton(
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                        icon: const Icon(Icons.videocam_rounded, color: Colors.white, size: 21),
+                        tooltip: 'Video Call',
+                        onPressed: () => _openCallScreen(isVideoCall: true, isCaller: true),
+                      ),
+                      // 3-dots Menu button
+                      IconButton(
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(minWidth: 32, minHeight: 36),
+                        icon: const Icon(Icons.more_vert_rounded, color: Colors.white, size: 22),
+                        tooltip: 'Menu',
+                        onPressed: _showThreeDotsMenu,
+                      ),
                     ],
                   ),
                 ),
@@ -4818,7 +4936,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               final message = displayList[index];
 
 
-                              final bool isMe = message['isMe'] == true;
+                              final bool isMe = _isMessageFromMe(message);
                               final bool isDeleted = message['isDeleted'] == true || message['is_deleted'] == true;
                               final bool isEdited = message['isEdited'] == true || message['is_edited'] == true;
                               final bool isUploading = message['isUploading'] == true;
@@ -4867,7 +4985,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                         ),
                                         child: Row(
                                           mainAxisSize: MainAxisSize.min,
-                                          children: ['â ¤ï¸ ', 'ðŸ‘ ', 'ðŸ˜‚', 'ðŸ˜®', 'ðŸ˜¢', 'ðŸ™ '].map((emoji) {
+                                          children: ['❤️', '👍', '😂', '😮', '😢', '🙏'].map((emoji) {
                                             return GestureDetector(
                                               onTap: () => _toggleReaction(message['id'], emoji),
                                               child: Padding(
@@ -4884,13 +5002,15 @@ class _ChatScreenState extends State<ChatScreen> {
                                       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
                                       child: Builder(
                                         builder: (context) {
+                                          final screenWidth = MediaQuery.of(context).size.width;
+                                          final maxBubbleWidth = (screenWidth * 0.75).clamp(260.0, 480.0);
                                           final bool isImageMessage = !isDeleted && formattedImgUrl != null && message['attachmentType'] == 'image';
                                           final bool hasCaption = isImageMessage && message['message'] != null && message['message'].toString().trim().isNotEmpty;
                                           final bool hasReply = message['replyToMessageId'] != null;
 
                                           return Container(
                                             constraints: BoxConstraints(
-                                              maxWidth: isImageMessage ? 295 : 280,
+                                              maxWidth: maxBubbleWidth,
                                               minWidth: isImageMessage ? 200 : 0,
                                             ),
                                             margin: const EdgeInsets.only(bottom: 8),
@@ -4951,7 +5071,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                                               message['replySenderId'] ?? message['reply_sender_id'],
                                                               message['replySenderName'] ?? message['reply_sender_name'],
                                                               message['replySenderId'] != null &&
-                                                                  int.tryParse(message['replySenderId'].toString()) == widget.currentUserId,
+                                                                  int.tryParse(message['replySenderId'].toString()) == currentUserId,
                                                             ),
                                                             style: TextStyle(
                                                               fontWeight: FontWeight.w900,
@@ -5681,6 +5801,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       HeartbeatButton(
                         socket: socket,
                         conversationId: widget.conversationId,
+                        currentUserId: currentUserId,
                         isPartnerOnline: isOtherUserOnline,
                       ),
                       // Touch Together button
@@ -5701,6 +5822,35 @@ class _ChatScreenState extends State<ChatScreen> {
                                 ? AppTheme.primaryTeal
                                 : (isDark ? Colors.grey.shade300 : const Color(0xFF111B21)),
                             size: 22,
+                          ),
+                        ),
+                      ),
+                      // Our Sky button
+                      GestureDetector(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => SharedSkyScreen(
+                                conversationId: widget.conversationId,
+                                currentUserId: currentUserId,
+                                partnerName: peerDisplayName.isNotEmpty ? peerDisplayName : 'Partner',
+                                socket: socket,
+                              ),
+                            ),
+                          );
+                        },
+                        child: Container(
+                          margin: const EdgeInsets.only(right: 2),
+                          padding: const EdgeInsets.all(7),
+                          decoration: const BoxDecoration(
+                            color: Colors.transparent,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            Icons.auto_awesome_rounded,
+                            color: Color(0xFFFFD700),
+                            size: 21,
                           ),
                         ),
                       ),
@@ -5827,23 +5977,40 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
 
-            // Realtime Heartbeat Overlay when receiving heartbeat from partner
-            if (_isReceivingHeartbeat)
-              const Positioned.fill(
-                child: HeartbeatOverlay(),
-              ),
-
-            // Touch Together (Live Finger Trail) full-screen overlay
-            if (_showFingerTrail)
-              Positioned.fill(
-                child: FingerTrailOverlay(
-                  currentUserId: widget.currentUserId,
-                  onClose: () => setState(() => _showFingerTrail = false),
-                ),
-              ),
           ],
         ),
       ),
+
+      // Realtime Heartbeat Overlay when receiving heartbeat from partner
+      if (_isReceivingHeartbeat)
+        const Positioned.fill(
+          child: HeartbeatOverlay(),
+        ),
+
+      // Touch Together (Live Finger Trail) full-screen overlay
+      if (_showFingerTrail)
+        Positioned.fill(
+          child: FingerTrailOverlay(
+            currentUserId: currentUserId,
+            onClose: () => setState(() => _showFingerTrail = false),
+          ),
+        ),
+
+      // Live Hug Received Animation Overlay
+      if (_currentReceivedHug != null)
+        HugAnimatedOverlay(
+          hug: _currentReceivedHug!,
+          onDismiss: () => setState(() => _currentReceivedHug = null),
+        ),
+
+      // Kiss Sync Interactive Matchmaker Overlay
+      if (_showKissSyncModal)
+        KissSyncOverlay(
+          conversationId: widget.conversationId,
+          currentUserId: currentUserId,
+          partnerName: peerDisplayName.isNotEmpty ? peerDisplayName : 'Partner',
+          onClose: () => setState(() => _showKissSyncModal = false),
+        ),
     ],
   ),
 );

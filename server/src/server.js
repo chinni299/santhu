@@ -8,6 +8,8 @@ const messageRoutes = require("./messages");
 const cors = require("cors");
 const { registerHeartbeatHandlers } = require("./heartbeat_handler");
 const { registerFingerTrailHandlers } = require("./finger_trail_handler");
+const { sharedSkyRouter, registerSharedSkyHandlers } = require("./shared_sky_handler");
+const { hugKissRouter, registerHugKissHandlers } = require("./hug_kiss_handler");
 
 const pool = require("./db");
 const { redis, isRedisEnabled } = require("./redisClient");
@@ -71,8 +73,10 @@ app.all("/auth/register", (req, res) => {
 // Public /uploads static route removed for security (PHASE 3)
 app.use("/auth", authRoutes);
 app.use("/messages", messageRoutes);
+app.use("/shared-sky", sharedSkyRouter);
+app.use("/hug-kiss", hugKissRouter);
 
-console.log("MESSAGES API REGISTERED ✅");
+console.log("MESSAGES, SHARED SKY & HUG-KISS API REGISTERED ✅");
 
 app.get("/", (req, res) => {
   res.json({
@@ -439,6 +443,8 @@ async function sweepExpiredLiveLocations() {
 io.on("connection", (socket) => {
   registerHeartbeatHandlers(io, socket, userSockets);
   registerFingerTrailHandlers(io, socket);
+  registerSharedSkyHandlers(io, socket);
+  registerHugKissHandlers(io, socket, userSockets);
   const authUserId = socket.user?.userId || socket.user?.id;
   console.log(`[SERVER SOCKET] CLIENT CONNECTED: socketId=${socket.id}`);
   console.log(`[SERVER SOCKET] USER: ${authUserId}`);

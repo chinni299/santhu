@@ -465,11 +465,11 @@ class AuthService {
               ? customAlias
               : (dbName.isNotEmpty ? dbName : (otherUserId == 2 ? 'Leslie' : 'User $otherUserId'));
 
-          final avatarUrl = u['avatar_url'] != null && u['avatar_url'].toString().isNotEmpty
+          final avatarUrl = (u['avatar_url'] != null && u['avatar_url'].toString().isNotEmpty)
               ? (u['avatar_url'].toString().startsWith('http')
                   ? u['avatar_url'].toString()
                   : '${ApiConfig.baseUrl}${u['avatar_url']}')
-              : getAvatarUrl(otherUserId);
+              : '';
 
           return {
             'id': otherUserId,
@@ -492,7 +492,7 @@ class AuthService {
       'display_name': customAlias ?? (otherUserId == 2 ? 'Leslie' : 'User $otherUserId'),
       'name': customAlias ?? (otherUserId == 2 ? 'Leslie' : 'User $otherUserId'),
       'avatar_path': localAvatar ?? '',
-      'avatar_url': getAvatarUrl(otherUserId),
+      'avatar_url': '',
       'status': 'Available',
     };
   }

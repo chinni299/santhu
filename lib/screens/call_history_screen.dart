@@ -121,7 +121,7 @@ class _CallHistoryScreenState extends State<CallHistoryScreen> {
                   : ListView.separated(
                       padding: const EdgeInsets.symmetric(vertical: 8),
                       itemCount: _calls.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1, indent: 72),
+                      separatorBuilder: (context, index) => const Divider(height: 1, indent: 72),
                       itemBuilder: (context, i) {
                         final call = _calls[i];
                         final bool isOutgoing = int.tryParse(call['caller_id'].toString()) == widget.currentUserId;
