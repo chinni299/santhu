@@ -846,10 +846,26 @@ class _ChatScreenState extends State<ChatScreen> {
       'userId': widget.currentUserId,
       'emoji': emoji,
     });
+    // Optimistic local update — server will confirm/correct via messageReaction event
     setState(() {
       selectedMessage = null;
+      for (var msg in messages) {
+        if (msg['id'] != null && msg['id'].toString() == messageId.toString()) {
+          final Map<String, dynamic> reactions =
+              msg['reactions'] is Map ? Map<String, dynamic>.from(msg['reactions']) : {};
+          final String userKey = widget.currentUserId.toString();
+          if (reactions[userKey] == emoji) {
+            reactions.remove(userKey); // toggle off
+          } else {
+            reactions[userKey] = emoji; // set new reaction
+          }
+          msg['reactions'] = reactions;
+          break;
+        }
+      }
     });
   }
+
 
   // ==================================================
   // "ON THIS DAY" MEMORIES

@@ -107,6 +107,15 @@ pool.query(`
   console.error("Migration error for scheduled_messages table:", err.message);
 });
 
+// Migration for Message Reactions
+pool.query(`
+  ALTER TABLE messages ADD COLUMN IF NOT EXISTS reactions JSONB DEFAULT '{}'::jsonb;
+`).then(() => {
+  console.log("Messages table reactions column verified ✅");
+}).catch((err) => {
+  console.error("Migration error for reactions column:", err.message);
+});
+
 // Migration for Shared Countdown / Anniversary Tracker
 pool.query(`
   CREATE TABLE IF NOT EXISTS special_dates (
