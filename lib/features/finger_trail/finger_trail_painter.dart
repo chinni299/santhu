@@ -1,32 +1,37 @@
 import 'package:flutter/material.dart';
 import 'finger_trail_service.dart';
 
-/// CustomPainter that renders own + partner trail segments with a timed fade.
+/// CustomPainter for the Live Finger Trail canvas.
+///
+/// Takes a [repaint] listenable (AnimationController) so Flutter calls paint()
+/// at the vsync rate WITHOUT rebuilding the widget tree.
+/// Reads DateTime.now() directly in paint() — no need for a nowMs parameter.
 class FingerTrailPainter extends CustomPainter {
   final List<TrailPoint> myPoints;
   final List<TrailPoint> partnerPoints;
   final Color myColor;
   final Color partnerColor;
-  final int nowMs;
 
   const FingerTrailPainter({
     required this.myPoints,
     required this.partnerPoints,
     required this.myColor,
     required this.partnerColor,
-    required this.nowMs,
-  });
+    required Listenable repaint,
+  }) : super(repaint: repaint);
 
-  static const double _fadeDurationMs = 2000;
-  static const double _maxStrokeWidth = 24;
+  static const double _fadeDurationMs = 2000.0;
+  static const double _maxStrokeWidth = 24.0;
 
   @override
   void paint(Canvas canvas, Size size) {
-    _drawTrail(canvas, size, myPoints, myColor);
-    _drawTrail(canvas, size, partnerPoints, partnerColor);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    _drawTrail(canvas, size, myPoints, myColor, nowMs);
+    _drawTrail(canvas, size, partnerPoints, partnerColor, nowMs);
   }
 
-  void _drawTrail(Canvas canvas, Size size, List<TrailPoint> pts, Color color) {
+  void _drawTrail(
+      Canvas canvas, Size size, List<TrailPoint> pts, Color color, int nowMs) {
     if (pts.isEmpty) return;
 
     for (int i = 1; i < pts.length; i++) {
@@ -37,19 +42,20 @@ class FingerTrailPainter extends CustomPainter {
       final alpha = 1.0 - (age / _fadeDurationMs);
       if (alpha <= 0.01) continue;
 
-      // Taper: newest segments are thickest
+      // Taper: newer segments are thicker
       final progress = i / pts.length;
-      final strokeW = (_maxStrokeWidth * progress * alpha).clamp(1.5, _maxStrokeWidth);
+      final strokeW =
+          (_maxStrokeWidth * progress * alpha).clamp(1.5, _maxStrokeWidth);
 
-      final dx0 = p0.x * size.width;
-      final dy0 = p0.y * size.height;
-      final dx1 = p1.x * size.width;
-      final dy1 = p1.y * size.height;
+      final x0 = p0.x * size.width;
+      final y0 = p0.y * size.height;
+      final x1 = p1.x * size.width;
+      final y1 = p1.y * size.height;
 
       // Glow layer
       canvas.drawLine(
-        Offset(dx0, dy0),
-        Offset(dx1, dy1),
+        Offset(x0, y0),
+        Offset(x1, y1),
         Paint()
           ..color = color.withValues(alpha: alpha * 0.25)
           ..strokeWidth = strokeW * 2.8
@@ -61,8 +67,8 @@ class FingerTrailPainter extends CustomPainter {
 
       // Core stroke
       canvas.drawLine(
-        Offset(dx0, dy0),
-        Offset(dx1, dy1),
+        Offset(x0, y0),
+        Offset(x1, y1),
         Paint()
           ..color = color.withValues(alpha: alpha * 0.92)
           ..strokeWidth = strokeW
@@ -91,7 +97,7 @@ class FingerTrailPainter extends CustomPainter {
             ..style = PaintingStyle.fill,
         );
 
-        // Inner dot
+        // Inner white dot
         canvas.drawCircle(
           Offset(cx, cy),
           7 * alpha,
