@@ -29,6 +29,8 @@ import '../widgets/wave_clipper.dart';
 
 import 'call_screen.dart';
 import 'media_gallery_screen.dart';
+import 'special_dates_screen.dart';
+import 'call_history_screen.dart';
 
 
 class ChatScreen extends StatefulWidget {
@@ -178,21 +180,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   ImageProvider? _getAvatarImageProvider(String? localPath, String? networkUrl) {
-    if (localPath != null && localPath.isNotEmpty) {
-      if (localPath.startsWith('http')) {
-        return NetworkImage(localPath);
-      }
-      if (!kIsWeb) {
-        final file = File(localPath);
-        if (file.existsSync()) {
-          return FileImage(file);
-        }
-      }
-    }
-    if (networkUrl != null && networkUrl.isNotEmpty) {
-      return NetworkImage(networkUrl);
-    }
-    return null;
+    return AuthService.getAvatarImageProvider(localPath, networkUrl);
   }
 
   void _showEditContactNameDialog() {
@@ -310,12 +298,11 @@ class _ChatScreenState extends State<ChatScreen> {
       if (isEncrypted && !isDeleted && nonce != null && rawText != null) {
         try {
           final decrypted = await EncryptionService().decryptText(rawText.toString(), nonce.toString(), _sharedSecretKey!);
-          messages[i]['message'] = decrypted;
-          updated = true;
-        } catch (_) {
-          messages[i]['message'] = '[Unable to decrypt message]';
-          updated = true;
-        }
+          if (!decrypted.startsWith('[Decryption Error:')) {
+            messages[i]['message'] = decrypted;
+            updated = true;
+          }
+        } catch (_) {}
       }
     }
     if (updated && mounted) {
@@ -333,13 +320,17 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     if (_sharedSecretKey == null) {
-      return '[Unable to decrypt message]';
+      return rawMessage.toString();
     }
 
     try {
-      return await EncryptionService().decryptText(rawMessage.toString(), nonce.toString(), _sharedSecretKey!);
+      final decrypted = await EncryptionService().decryptText(rawMessage.toString(), nonce.toString(), _sharedSecretKey!);
+      if (decrypted.startsWith('[Decryption Error:')) {
+        return rawMessage.toString();
+      }
+      return decrypted;
     } catch (_) {
-      return '[Unable to decrypt message]';
+      return rawMessage.toString();
     }
   }
 
@@ -1596,7 +1587,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final convId = data['conversationId'];
       if (convId != null && convId.toString() != widget.conversationId.toString()) return;
 
-      final callerName = data['callerName'] ?? (widget.currentUserId == 1 ? "Second User" : "Test User");
+      final callerName = data['callerName'] ?? (peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? "User 2" : "User 1"));
       final isVideoCall = data['isVideoCall'] == true;
 
       if (!mounted) return;
@@ -1653,11 +1644,11 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     });
 
-    socket?.connect(); // Single connect() Î“Ã‡Ã¶ auth already in socket at creation
+    socket?.connect(); // Single connect()
   }
 
   void _openCallScreen({required bool isVideoCall, required bool isCaller}) {
-    final otherUserName = widget.currentUserId == 1 ? "Second User" : "Test User";
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? "User 2" : "User 1");
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -1900,6 +1891,42 @@ class _ChatScreenState extends State<ChatScreen> {
                 const SizedBox(height: 8),
 
                 _buildMenuItem(
+                  icon: Icons.calendar_today_rounded,
+                  iconColor: Colors.pinkAccent,
+                  title: 'Special Dates & Countdowns 💕',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => SpecialDatesScreen(
+                          socket: socket,
+                          conversationId: widget.conversationId,
+                          currentUserId: widget.currentUserId,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+                _buildMenuItem(
+                  icon: Icons.phone_callback_rounded,
+                  iconColor: AppTheme.primaryTeal,
+                  title: 'Call History Logs 📞',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => CallHistoryScreen(
+                          conversationId: widget.conversationId,
+                          currentUserId: widget.currentUserId,
+                          peerName: peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'User 2' : 'User 1'),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+                _buildMenuItem(
                   icon: Icons.info_outline_rounded,
                   title: 'Contact info',
                   onTap: () {
@@ -2070,6 +2097,58 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Future<void> _pickContactAvatar() async {
+    try {
+      Uint8List? pickedBytes;
+      String? pickedPath;
+
+      try {
+        final picker = ImagePicker();
+        final image = await picker.pickImage(source: ImageSource.gallery);
+        if (image != null) {
+          pickedBytes = await image.readAsBytes();
+          pickedPath = image.path;
+        }
+      } catch (_) {}
+
+      if (pickedBytes == null) {
+        final result = await FilePicker.platform.pickFiles(type: FileType.image, withData: true);
+        if (result != null && result.files.isNotEmpty && result.files.first.bytes != null) {
+          pickedBytes = result.files.first.bytes;
+          pickedPath = result.files.first.path;
+        }
+      }
+
+      if (pickedBytes != null) {
+        final otherUserId = widget.currentUserId == 1 ? 2 : 1;
+        final base64Image = 'data:image/jpeg;base64,${base64Encode(pickedBytes)}';
+        await AuthService.saveAvatarPath(base64Image, otherUserId);
+
+        if (mounted) {
+          setState(() {
+            peerAvatarPath = base64Image;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text("Profile picture updated successfully! ✅"),
+              backgroundColor: AppTheme.primaryTeal,
+            ),
+          );
+        }
+
+        // Upload in background to sync with backend
+        AuthService.uploadAvatar(
+          userId: otherUserId,
+          bytes: pickedBytes,
+          filename: 'avatar_$otherUserId.jpg',
+          localFilePath: pickedPath,
+        );
+      }
+    } catch (e) {
+      debugPrint("Error updating contact avatar: $e");
+    }
+  }
+
   void _showContactInfo() {
     final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
     final mediaCount = messages.where((m) => m['attachmentType'] == 'image').length;
@@ -2080,37 +2159,61 @@ class _ChatScreenState extends State<ChatScreen> {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) {
-        final isDark = Theme.of(context).brightness == Brightness.dark;
-        return Material(
-          color: isDark ? const Color(0xFF121E24) : Colors.white,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
-          clipBehavior: Clip.antiAlias,
-          child: Container(
-            height: MediaQuery.of(context).size.height * 0.75,
-            padding: const EdgeInsets.all(24),
-            child: SingleChildScrollView(
-              child: Column(
-              children: [
-              Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade400,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const SizedBox(height: 20),
-              CircleAvatar(
-                radius: 44,
-                backgroundColor: AppTheme.primaryTeal,
-                backgroundImage: _getAvatarImageProvider(peerAvatarPath, peerAvatarUrl),
-                child: _getAvatarImageProvider(peerAvatarPath, peerAvatarUrl) == null
-                    ? Text(
-                        otherUserName.isNotEmpty ? otherUserName[0].toUpperCase() : 'U',
-                        style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w900, color: Colors.white),
-                      )
-                    : null,
-              ),
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final isDark = Theme.of(context).brightness == Brightness.dark;
+            return Material(
+              color: isDark ? const Color(0xFF121E24) : Colors.white,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
+              clipBehavior: Clip.antiAlias,
+              child: Container(
+                height: MediaQuery.of(context).size.height * 0.75,
+                padding: const EdgeInsets.all(24),
+                child: SingleChildScrollView(
+                  child: Column(
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade400,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      GestureDetector(
+                        onTap: () async {
+                          await _pickContactAvatar();
+                          setModalState(() {});
+                        },
+                        child: Stack(
+                          alignment: Alignment.bottomRight,
+                          children: [
+                            CircleAvatar(
+                              radius: 48,
+                              backgroundColor: AppTheme.primaryTeal,
+                              backgroundImage: _getAvatarImageProvider(peerAvatarPath, peerAvatarUrl),
+                              child: _getAvatarImageProvider(peerAvatarPath, peerAvatarUrl) == null
+                                  ? Text(
+                                      otherUserName.isNotEmpty ? otherUserName[0].toUpperCase() : 'U',
+                                      style: const TextStyle(fontSize: 38, fontWeight: FontWeight.w900, color: Colors.white),
+                                    )
+                                  : null,
+                            ),
+                            Container(
+                              padding: const EdgeInsets.all(7),
+                              decoration: const BoxDecoration(
+                                color: AppTheme.primaryTeal,
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(color: Colors.black26, blurRadius: 4),
+                                ],
+                              ),
+                              child: const Icon(Icons.camera_alt_rounded, color: Colors.white, size: 18),
+                            ),
+                          ],
+                        ),
+                      ),
               const SizedBox(height: 12),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -2194,12 +2297,14 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ],
           ),
-            ),
         ),
-      );
-    },
-  );
-  }
+      ),
+    );
+  },
+);
+  },
+);
+}
 
   Widget _buildContactActionButton(IconData icon, String label, VoidCallback onTap) {
     return InkWell(
@@ -4038,23 +4143,24 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty) return;
 
     if (!_isE2eeReady || _sharedSecretKey == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Secure connection is not ready. Please try again.')),
-      );
-      return;
+      await _initE2EE();
     }
 
     _stopTypingEmit();
 
+    final bool canEncrypt = _isE2eeReady && _sharedSecretKey != null;
+    final Map<String, String> encResult = canEncrypt
+        ? await EncryptionService().encryptText(text, _sharedSecretKey!)
+        : {'ciphertext': text, 'nonce': ''};
+
     if (editingMessageId != null) {
-      final encResult = await EncryptionService().encryptText(text, _sharedSecretKey!);
       socket?.emit('editMessage', {
         'conversationId': widget.conversationId,
         'messageId': editingMessageId,
         'senderId': widget.currentUserId,
         'newMessage': encResult['ciphertext'],
         'nonce': encResult['nonce'],
-        'isEncrypted': true,
+        'isEncrypted': canEncrypt,
       });
 
       final idx = messages.indexWhere((m) => m['id'] == editingMessageId);
@@ -4063,6 +4169,7 @@ class _ChatScreenState extends State<ChatScreen> {
           messages[idx]['message'] = text;
           messages[idx]['rawMessage'] = encResult['ciphertext'];
           messages[idx]['nonce'] = encResult['nonce'];
+          messages[idx]['isEncrypted'] = canEncrypt;
           messages[idx]['isEdited'] = true;
           messages[idx]['is_edited'] = true;
         });
@@ -4079,16 +4186,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
       final String tempMsgId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
 
-      final encResult = await EncryptionService().encryptText(text, _sharedSecretKey!);
-
       final optimisticMsg = {
         'id': tempMsgId,
         'senderId': widget.currentUserId,
         'message': text,
         'rawMessage': encResult['ciphertext'],
         'nonce': encResult['nonce'],
-        'isEncrypted': true,
-        'is_encrypted': true,
+        'isEncrypted': canEncrypt,
+        'is_encrypted': canEncrypt,
         'attachmentUrl': null,
         'attachmentType': null,
         'attachmentName': null,
@@ -4115,13 +4220,13 @@ class _ChatScreenState extends State<ChatScreen> {
       });
       _scrollToBottom();
 
-      debugPrint('[CHAT SOCKET] SEND ENCRYPTED MESSAGE (E2EE enabled)');
+      debugPrint('[CHAT SOCKET] SEND MESSAGE (canEncrypt=$canEncrypt)');
       socket?.emit('sendMessage', {
         'conversationId': widget.conversationId,
         'senderId': widget.currentUserId,
         'message': encResult['ciphertext'],
         'nonce': encResult['nonce'],
-        'isEncrypted': true,
+        'isEncrypted': canEncrypt,
         'replyToMessageId': replyId,
         'tempMsgId': tempMsgId,
       });
@@ -5134,7 +5239,16 @@ class _ChatScreenState extends State<ChatScreen> {
                                                 ] else if (!isDeleted) ...[
                                                   Builder(
                                                     builder: (context) {
-                                                      final String msgStr = message['message']?.toString() ?? '';
+                                                      final String rawMsgStr = message['message']?.toString() ?? '';
+                                                      final bool isEnc = message['isEncrypted'] == true || message['is_encrypted'] == true;
+                                                      final String msgStr = rawMsgStr.trim().isNotEmpty
+                                                          ? rawMsgStr
+                                                          : (isEnc
+                                                              ? (message['rawMessage']?.toString().trim().isNotEmpty == true
+                                                                  ? message['rawMessage'].toString()
+                                                                  : '[Encrypted Message]')
+                                                              : ' ');
+
                                                       final bool isCallLink = msgStr.contains('duochat.call') ||
                                                           msgStr.contains('clock.call') ||
                                                           msgStr.contains('Join my Clock Call') ||

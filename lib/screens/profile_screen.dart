@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -38,12 +40,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final user = await AuthService.getUser();
     final localAvatar = await AuthService.getAvatarPath(widget.currentUserId);
     File? avatarFile;
-    if (!kIsWeb && localAvatar != null && localAvatar.isNotEmpty) {
+    Uint8List? avatarBytes;
+
+    if (localAvatar != null && localAvatar.startsWith('data:image/')) {
+      try {
+        final parts = localAvatar.split(',');
+        if (parts.length > 1) {
+          avatarBytes = base64Decode(parts[1]);
+        }
+      } catch (_) {}
+    } else if (!kIsWeb && localAvatar != null && localAvatar.isNotEmpty) {
       final f = File(localAvatar);
       if (f.existsSync()) {
         avatarFile = f;
       }
     }
+
     setState(() {
       _userData = user.isNotEmpty
           ? user
@@ -54,42 +66,73 @@ class _ProfileScreenState extends State<ProfileScreen> {
               'email': widget.currentUserId == 1 ? 'user1@example.com' : 'user2@example.com',
             };
       _avatarFile = avatarFile;
-      _avatarUrl = user['avatar_url'] ?? AuthService.getAvatarUrl(widget.currentUserId);
+      _avatarBytes = avatarBytes;
+      _avatarUrl = localAvatar ?? user['avatar_url'] ?? AuthService.getAvatarUrl(widget.currentUserId);
       _isLoading = false;
     });
   }
 
   Future<void> _pickAvatar() async {
-    final picker = ImagePicker();
-    final image = await picker.pickImage(source: ImageSource.gallery);
-    if (image != null) {
-      final bytes = await image.readAsBytes();
-      setState(() {
-        _avatarBytes = bytes;
-        if (!kIsWeb) {
-          _avatarFile = File(image.path);
+    try {
+      Uint8List? pickedBytes;
+      String? pickedName;
+      String? pickedPath;
+
+      try {
+        final picker = ImagePicker();
+        final image = await picker.pickImage(source: ImageSource.gallery);
+        if (image != null) {
+          pickedBytes = await image.readAsBytes();
+          pickedName = image.name;
+          pickedPath = image.path;
         }
-      });
-
-      final uploadedUrl = await AuthService.uploadAvatar(
-        userId: widget.currentUserId,
-        bytes: bytes,
-        filename: image.name,
-        localFilePath: image.path,
-      );
-
-      if (uploadedUrl != null) {
-        setState(() {
-          _avatarUrl = uploadedUrl;
-        });
+      } catch (e) {
+        debugPrint("ImagePicker failed ($e), trying FilePicker fallback...");
       }
 
+      if (pickedBytes == null) {
+        final result = await FilePicker.platform.pickFiles(type: FileType.image, withData: true);
+        if (result != null && result.files.isNotEmpty && result.files.first.bytes != null) {
+          pickedBytes = result.files.first.bytes;
+          pickedName = result.files.first.name;
+          pickedPath = result.files.first.path;
+        }
+      }
+
+      if (pickedBytes != null) {
+        final bytes = pickedBytes;
+        final base64Image = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+        await AuthService.saveAvatarPath(base64Image, widget.currentUserId);
+
+        setState(() {
+          _avatarBytes = bytes;
+          _avatarUrl = base64Image;
+          if (!kIsWeb && pickedPath != null && pickedPath.isNotEmpty) {
+            _avatarFile = File(pickedPath);
+          }
+        });
+
+        AuthService.uploadAvatar(
+          userId: widget.currentUserId,
+          bytes: bytes,
+          filename: pickedName ?? 'avatar.jpg',
+          localFilePath: pickedPath,
+        );
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text("Profile picture updated successfully! ✅"),
+              backgroundColor: AppTheme.primaryTeal,
+            ),
+          );
+        }
+      }
+    } catch (err) {
+      debugPrint("Error picking avatar: $err");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("Profile picture updated successfully! ✅"),
-            backgroundColor: AppTheme.primaryTeal,
-          ),
+          SnackBar(content: Text("Could not pick image: $err")),
         );
       }
     }

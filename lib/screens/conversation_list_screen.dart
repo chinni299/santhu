@@ -1,6 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:socket_io_client/socket_io_client.dart' as io;
@@ -12,6 +10,8 @@ import '../widgets/wave_clipper.dart';
 import 'chat_screen.dart';
 import 'login_screen.dart';
 import 'profile_screen.dart';
+import 'special_dates_screen.dart';
+import 'call_history_screen.dart';
 
 class ConversationListScreen extends StatefulWidget {
   final int currentUserId;
@@ -61,21 +61,7 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
   }
 
   ImageProvider? _getAvatarImageProvider(String? localPath, String? networkUrl) {
-    if (localPath != null && localPath.isNotEmpty) {
-      if (localPath.startsWith('http')) {
-        return NetworkImage(localPath);
-      }
-      if (!kIsWeb) {
-        final file = File(localPath);
-        if (file.existsSync()) {
-          return FileImage(file);
-        }
-      }
-    }
-    if (networkUrl != null && networkUrl.isNotEmpty) {
-      return NetworkImage(networkUrl);
-    }
-    return null;
+    return AuthService.getAvatarImageProvider(localPath, networkUrl);
   }
 
   void _filterConversations() {
@@ -344,6 +330,109 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
     super.dispose();
   }
 
+  void _showMainMenuOptions() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final otherUserName = widget.currentUserId == 1 ? 'User 2' : 'User 1';
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return Material(
+          color: isDark ? const Color(0xFF1E293B) : const Color(0xFF1F2C33),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          clipBehavior: Clip.antiAlias,
+          child: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    "Quick Shortcuts & Features",
+                    style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w900),
+                  ),
+                  const SizedBox(height: 16),
+                  ListTile(
+                    leading: const Icon(Icons.calendar_today_rounded, color: Colors.pinkAccent),
+                    title: const Text("Special Dates & Countdowns 💕", style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                    subtitle: const Text("Anniversaries, birthdays & live countdowns", style: TextStyle(color: Colors.white60, fontSize: 12)),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => SpecialDatesScreen(
+                            socket: socket,
+                            conversationId: 1,
+                            currentUserId: widget.currentUserId,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.phone_callback_rounded, color: AppTheme.primaryTeal),
+                    title: const Text("Call History Logs 📞", style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                    subtitle: const Text("View audio & video call logs", style: TextStyle(color: Colors.white60, fontSize: 12)),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => CallHistoryScreen(
+                            conversationId: 1,
+                            currentUserId: widget.currentUserId,
+                            peerName: otherUserName,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.person_rounded, color: Colors.amber),
+                    title: const Text("My Profile & Settings 👤", style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                    subtitle: const Text("Edit name, avatar & preferences", style: TextStyle(color: Colors.white60, fontSize: 12)),
+                    onTap: () async {
+                      Navigator.pop(ctx);
+                      await Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ProfileScreen(currentUserId: widget.currentUserId),
+                        ),
+                      );
+                      _loadUserProfile();
+                      fetchConversations();
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.lock_rounded, color: Colors.lightBlueAccent),
+                    title: const Text("Lock App Immediately 🔒", style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      AppLockService.lockApp();
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   String _formatTime(String rawTime) {
     if (rawTime.isEmpty) return '';
     try {
@@ -539,7 +628,7 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
                           color: isDark ? Colors.white70 : const Color(0xFF111B21),
                           size: 28,
                         ),
-                        onPressed: () {},
+                        onPressed: _showMainMenuOptions,
                       ),
                     ],
                   ),

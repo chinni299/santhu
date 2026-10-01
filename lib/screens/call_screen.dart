@@ -75,23 +75,49 @@ class _CallScreenState extends State<CallScreen> {
       await _localRenderer.initialize();
       await _remoteRenderer.initialize();
 
-      // Create Local Media Stream
-      final mediaConstraints = {
+      // Create Local Media Stream with robust fallback strategy
+      final mediaConstraints = <String, dynamic>{
         'audio': true,
         'video': widget.isVideoCall
             ? {
                 'facingMode': 'user',
-                'mandatory': {
-                  'minWidth': '640',
-                  'minHeight': '480',
-                  'minFrameRate': '30',
-                },
+                'width': {'ideal': 640},
+                'height': {'ideal': 480},
               }
             : false,
       };
 
-      _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
-      _localRenderer.srcObject = _localStream;
+      try {
+        _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+      } catch (e1) {
+        debugPrint("Primary getUserMedia failed ($e1). Trying simple constraints...");
+        try {
+          final simpleConstraints = <String, dynamic>{
+            'audio': true,
+            'video': widget.isVideoCall ? true : false,
+          };
+          _localStream = await navigator.mediaDevices.getUserMedia(simpleConstraints);
+        } catch (e2) {
+          debugPrint("Simple video getUserMedia failed ($e2). Fallback to audio-only stream...");
+          try {
+            _localStream = await navigator.mediaDevices.getUserMedia({'audio': true, 'video': false});
+            _isCameraOff = true;
+          } catch (e3) {
+            debugPrint("Camera/Mic in use by another window ($e3). Continuing call in receive mode...");
+            _isCameraOff = true;
+            _isMuted = true;
+            if (mounted) {
+              setState(() {
+                _callStatus = 'Camera in use by another tab';
+              });
+            }
+          }
+        }
+      }
+
+      if (_localStream != null) {
+        _localRenderer.srcObject = _localStream;
+      }
 
       // Setup WebRTC Peer Connection
       // STUN alone only works when both peers are on "open" networks. Many
@@ -545,6 +571,24 @@ class _CallScreenState extends State<CallScreen> {
                               color: Colors.white.withValues(alpha: 0.7),
                             ),
                           ),
+                          if (_callStatus.contains('Failed') || _callStatus.contains('permission') || _callStatus.contains('blocked')) ...[
+                            const SizedBox(height: 14),
+                            ElevatedButton.icon(
+                              onPressed: () {
+                                setState(() {
+                                  _callStatus = 'Retrying camera/mic access...';
+                                });
+                                _initCall();
+                              },
+                              icon: const Icon(Icons.refresh_rounded, size: 18),
+                              label: const Text('Retry Camera/Mic Access'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: AppTheme.primaryTeal,
+                                foregroundColor: Colors.white,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ),

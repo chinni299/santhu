@@ -1,6 +1,8 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -349,6 +351,46 @@ class AuthService {
 
   static String getAvatarUrl(int userId) {
     return '${ApiConfig.baseUrl}/auth/avatar/$userId';
+  }
+
+  static ImageProvider? getAvatarImageProvider(String? localPath, String? networkUrl) {
+    if (localPath != null && localPath.isNotEmpty) {
+      if (localPath.startsWith('data:image/')) {
+        try {
+          final parts = localPath.split(',');
+          if (parts.length > 1) {
+            final bytes = base64Decode(parts[1]);
+            return MemoryImage(bytes);
+          }
+        } catch (e) {
+          debugPrint("Error decoding base64 avatar: $e");
+        }
+      }
+      if (localPath.startsWith('http')) {
+        return NetworkImage(localPath);
+      }
+      if (!kIsWeb) {
+        try {
+          final file = File(localPath);
+          if (file.existsSync()) {
+            return FileImage(file);
+          }
+        } catch (_) {}
+      }
+    }
+    if (networkUrl != null && networkUrl.isNotEmpty) {
+      if (networkUrl.startsWith('data:image/')) {
+        try {
+          final parts = networkUrl.split(',');
+          if (parts.length > 1) {
+            final bytes = base64Decode(parts[1]);
+            return MemoryImage(bytes);
+          }
+        } catch (_) {}
+      }
+      return NetworkImage(networkUrl);
+    }
+    return null;
   }
 
   // Upload Avatar to Backend and persist locally
