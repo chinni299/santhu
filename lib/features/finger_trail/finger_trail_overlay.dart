@@ -350,28 +350,21 @@ class _ConnectingPill extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: Colors.amber.withValues(alpha: 0.15),
+        color: const Color(0xFF00E5FF).withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.amber.withValues(alpha: 0.4), width: 1),
+        border: Border.all(color: const Color(0xFF00E5FF).withValues(alpha: 0.4), width: 1),
       ),
       child: const Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          SizedBox(
-            width: 8,
-            height: 8,
-            child: CircularProgressIndicator(
-              strokeWidth: 1.5,
-              color: Colors.amber,
-            ),
-          ),
-          SizedBox(width: 6),
+          Icon(Icons.brush_rounded, color: Color(0xFF00E5FF), size: 13),
+          SizedBox(width: 5),
           Text(
-            'Live Sync',
+            'Canvas Ready',
             style: TextStyle(
-              color: Colors.amber,
+              color: Color(0xFF00E5FF),
               fontSize: 11,
-              fontWeight: FontWeight.w600,
+              fontWeight: FontWeight.w700,
             ),
           ),
         ],
