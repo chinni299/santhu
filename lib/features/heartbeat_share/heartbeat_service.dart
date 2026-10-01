@@ -25,13 +25,9 @@ class HeartbeatService {
   static bool startSending({
     required io.Socket? socket,
     required int conversationId,
-    required bool isPartnerOnline,
+    bool isPartnerOnline = true,
     OnOfflineCallback? onOffline,
   }) {
-    if (!isPartnerOnline) {
-      if (onOffline != null) onOffline();
-      return false;
-    }
     if (socket == null || !socket.connected) {
       if (onOffline != null) onOffline();
       return false;
@@ -40,6 +36,8 @@ class HeartbeatService {
 
     _isSending = true;
     onPartnerOffline = onOffline;
+
+    debugPrint('[HEARTBEAT SERVICE] EMITTING heartbeat_start to socket');
 
     // Emit initial start event
     socket.emit('heartbeat_start', {
@@ -57,7 +55,7 @@ class HeartbeatService {
 
     void emitBeatCycle() {
       if (!_isSending) return;
-      
+
       // Lub beat at 0ms
       socket.emit('heartbeat_beat', {
         'conversationId': conversationId,
@@ -102,6 +100,8 @@ class HeartbeatService {
     _rhythmTimer?.cancel();
     _rhythmTimer = null;
 
+    debugPrint('[HEARTBEAT SERVICE] EMITTING heartbeat_stop to socket');
+
     if (socket != null && socket.connected) {
       socket.emit('heartbeat_stop', {
         'conversationId': conversationId,
@@ -129,9 +129,16 @@ class HeartbeatService {
     });
 
     socket.on('heartbeat_beat', (data) {
-      if (!_isReceiving) return;
+      debugPrint('[HEARTBEAT SERVICE] Received heartbeat_beat: $data');
+      if (!_isReceiving) {
+        _isReceiving = true;
+        _activeSenderId = data != null && data['senderId'] != null ? data['senderId'] as int : null;
+        if (onStateChange != null) {
+          onStateChange!(true, _activeSenderId);
+        }
+      }
       final beatType = (data != null && data['beatType'] != null) ? data['beatType'].toString() : 'lub';
-      
+
       // Trigger Web Audio & Vibration
       HeartbeatAudio.playBeat(beatType);
       HeartbeatAudio.vibrate(beatType == 'lub' ? [70, 90, 70, 600] : [50, 50]);

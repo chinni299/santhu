@@ -31,7 +31,7 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
       duration: const Duration(milliseconds: 750),
     );
 
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.25).animate(
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.3).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
   }
@@ -43,10 +43,7 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
   }
 
   void _onPressDown() {
-    if (!widget.isPartnerOnline) {
-      _showOfflineSnackbar();
-      return;
-    }
+    if (_isHolding) return;
 
     final started = HeartbeatService.startSending(
       socket: widget.socket,
@@ -105,53 +102,48 @@ class _HeartbeatButtonState extends State<HeartbeatButton> with SingleTickerProv
   Widget build(BuildContext context) {
     final bool isDark = Theme.of(context).brightness == Brightness.dark;
 
-    return Listener(
-      onPointerDown: (_) => _onPressDown(),
-      onPointerUp: (_) => _onPressUp(),
-      onPointerCancel: (_) => _onPressUp(),
-      child: Tooltip(
-        message: widget.isPartnerOnline ? 'Hold to send Heartbeat ❤️' : 'Partner is offline 💔',
-        child: ScaleTransition(
-          scale: _scaleAnimation,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            width: 38,
-            height: 38,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => _onPressDown(),
+      onTapUp: (_) => _onPressUp(),
+      onTapCancel: () => _onPressUp(),
+      onLongPressStart: (_) => _onPressDown(),
+      onLongPressEnd: (_) => _onPressUp(),
+      onLongPressCancel: () => _onPressUp(),
+      child: ScaleTransition(
+        scale: _scaleAnimation,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _isHolding
+                ? Colors.redAccent
+                : Colors.pink.withValues(alpha: 0.15),
+            border: Border.all(
               color: _isHolding
-                  ? Colors.redAccent
-                  : (widget.isPartnerOnline
-                      ? Colors.pink.withValues(alpha: 0.15)
-                      : Colors.grey.withValues(alpha: 0.15)),
-              border: Border.all(
-                color: _isHolding
-                    ? Colors.red
-                    : (widget.isPartnerOnline
-                        ? Colors.pinkAccent.withValues(alpha: 0.4)
-                        : Colors.grey.withValues(alpha: 0.3)),
-                width: _isHolding ? 2 : 1,
-              ),
-              boxShadow: _isHolding
-                  ? [
-                      BoxShadow(
-                        color: Colors.redAccent.withValues(alpha: 0.6),
-                        blurRadius: 14,
-                        spreadRadius: 3,
-                      ),
-                    ]
-                  : null,
+                  ? Colors.red
+                  : Colors.pinkAccent.withValues(alpha: 0.4),
+              width: _isHolding ? 2 : 1,
             ),
-            child: Center(
-              child: Icon(
-                _isHolding ? Icons.favorite_rounded : Icons.monitor_heart_rounded,
-                size: _isHolding ? 22 : 19,
-                color: _isHolding
-                    ? Colors.white
-                    : (widget.isPartnerOnline
-                        ? Colors.pinkAccent
-                        : (isDark ? Colors.grey.shade500 : Colors.grey.shade400)),
-              ),
+            boxShadow: _isHolding
+                ? [
+                    BoxShadow(
+                      color: Colors.redAccent.withValues(alpha: 0.6),
+                      blurRadius: 14,
+                      spreadRadius: 3,
+                    ),
+                  ]
+                : null,
+          ),
+          child: Center(
+            child: Icon(
+              _isHolding ? Icons.favorite_rounded : Icons.monitor_heart_rounded,
+              size: _isHolding ? 22 : 19,
+              color: _isHolding
+                  ? Colors.white
+                  : (isDark ? Colors.pink.shade300 : Colors.pinkAccent),
             ),
           ),
         ),
