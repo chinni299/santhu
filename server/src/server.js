@@ -1931,4 +1931,33 @@ server.listen(PORT, () => {
   // NEW: Scheduled messages — periodic sweep to send due messages
   setInterval(sweepDueScheduledMessages, SCHEDULED_SWEEP_MS);
   setTimeout(sweepDueScheduledMessages, 5000);
+
+  // ── Automatic Keep-Alive Self-Ping (Prevents Render Sleep Mode) ─────────
+  const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || process.env.SERVER_URL;
+  if (keepAliveUrl) {
+    const pingIntervalMs = 10 * 60 * 1000; // Ping every 10 minutes (600,000 ms)
+    console.log(`[KEEP-ALIVE] Auto self-ping initialized for ${keepAliveUrl} (every 10 mins) 🚀`);
+    
+    // Initial ping after 30 seconds
+    setTimeout(() => {
+      const httpModule = keepAliveUrl.startsWith("https") ? require("https") : require("http");
+      httpModule.get(keepAliveUrl, (res) => {
+        console.log(`[KEEP-ALIVE] Initial self-ping response status: ${res.statusCode} 🟢`);
+      }).on("error", (err) => {
+        console.error(`[KEEP-ALIVE] Initial self-ping error: ${err.message} ⚠️`);
+      });
+    }, 30000);
+
+    // Periodic ping loop
+    setInterval(() => {
+      const httpModule = keepAliveUrl.startsWith("https") ? require("https") : require("http");
+      httpModule.get(keepAliveUrl, (res) => {
+        console.log(`[KEEP-ALIVE] Periodic self-ping status: ${res.statusCode} 🟢`);
+      }).on("error", (err) => {
+        console.error(`[KEEP-ALIVE] Periodic self-ping error: ${err.message} ⚠️`);
+      });
+    }, pingIntervalMs);
+  } else {
+    console.log("[KEEP-ALIVE] RENDER_EXTERNAL_URL not set yet. Render automatically sets RENDER_EXTERNAL_URL when deployed.");
+  }
 });
