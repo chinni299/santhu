@@ -1738,6 +1738,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _startVoiceRecording() async {
     try {
+      final status = await Permission.microphone.request();
+      if (!status.isGranted && !status.isLimited) {
+        _showErrorSnackBar("Microphone permission is required to record voice messages");
+        return;
+      }
+
       final hasPermission = await _audioRecorder.hasPermission();
       if (!hasPermission) {
         _showErrorSnackBar("Microphone permission is required to record voice messages");
@@ -3984,6 +3990,15 @@ class _ChatScreenState extends State<ChatScreen> {
                       },
                     ),
                     _buildAttachmentGridItem(
+                      icon: Icons.back_hand_outlined,
+                      label: "Nudge",
+                      color: const Color(0xFFFF7043),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _sendNudge();
+                      },
+                    ),
+                    _buildAttachmentGridItem(
                       icon: Icons.volunteer_activism_rounded,
                       label: "Send Hug",
                       color: const Color(0xFF9C27B0),
@@ -5567,9 +5582,12 @@ class _ChatScreenState extends State<ChatScreen> {
                             }
                           });
                         },
+                        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
                         icon: Icon(
                           _showEmojiPicker ? Icons.keyboard_rounded : Icons.emoji_emotions_outlined,
                           color: isDark ? Colors.grey.shade400 : Colors.grey.shade600,
+                          size: 22,
                         ),
                       ),
                       Expanded(
@@ -5585,7 +5603,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             fontWeight: FontWeight.w700,
                           ),
                           decoration: InputDecoration(
-                            hintText: isVanishMode ? 'Send a vanishing message... \u{1F52E}' : 'Type your message here...',
+                            hintText: isVanishMode ? 'Vanishing msg... \u{1F52E}' : 'Type message...',
                             hintStyle: TextStyle(
                               color: isVanishMode
                                   ? const Color(0xFFCE93D8)
@@ -5597,40 +5615,23 @@ class _ChatScreenState extends State<ChatScreen> {
                             border: InputBorder.none,
                             enabledBorder: InputBorder.none,
                             focusedBorder: InputBorder.none,
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 12),
                           ),
                         ),
                       ),
                       IconButton(
-                        onPressed: _pickFromCamera,
-                        icon: Icon(
-                          Icons.camera_alt_rounded,
-                          color: isDark ? Colors.grey.shade300 : const Color(0xFF111B21),
-                          size: 22,
-                        ),
-                      ),
-                      IconButton(
-                        onPressed: _sendNudge,
-                        tooltip: 'Nudge',
-                        icon: Icon(
-                          Icons.back_hand_outlined,
-                          color: isDark ? Colors.grey.shade300 : const Color(0xFF111B21),
-                          size: 21,
-                        ),
-                      ),
-                      IconButton(
                         onPressed: _showAttachmentGridSheet,
-                        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
                         icon: Icon(
                           Icons.attach_file_rounded,
                           color: isDark ? Colors.grey.shade300 : const Color(0xFF111B21),
-                          size: 21,
+                          size: 20,
                         ),
                       ),
                       // ── Pink Circular Heartbeat Pulse Button ──
                       Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 3),
+                        padding: const EdgeInsets.symmetric(horizontal: 1),
                         child: HeartbeatButton(
                           socket: socket,
                           conversationId: widget.conversationId,
@@ -5642,37 +5643,44 @@ class _ChatScreenState extends State<ChatScreen> {
                       IconButton(
                         onPressed: _openFingerTrail,
                         tooltip: 'Touch Together',
-                        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
                         icon: Icon(
                           Icons.gesture_rounded,
                           color: isDark ? Colors.grey.shade300 : const Color(0xFF111B21),
-                          size: 21,
+                          size: 20,
                         ),
                       ),
                       // ── Shared Sky Sparkles Button ──
                       IconButton(
                         onPressed: _openSharedSky,
                         tooltip: 'Shared Sky',
-                        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
                         icon: Icon(
                           Icons.auto_awesome_rounded,
                           color: isDark ? const Color(0xFFFFD54F) : const Color(0xFFFFB300),
-                          size: 20,
+                          size: 19,
                         ),
                       ),
                       const SizedBox(width: 2),
                       (messageController.text.trim().isEmpty && editingMessageId == null)
                           ? GestureDetector(
+                              onTap: () {
+                                if (_isRecordingVoice) {
+                                  _stopVoiceRecordingAndSend();
+                                } else {
+                                  _startVoiceRecording();
+                                }
+                              },
                               onLongPressStart: (_) => _startVoiceRecording(),
                               onLongPressEnd: (_) => _stopVoiceRecordingAndSend(),
                               onLongPressCancel: () => _stopVoiceRecordingAndSend(cancel: true),
                               child: AnimatedContainer(
                                 duration: const Duration(milliseconds: 150),
-                                width: _isRecordingVoice ? 52 : 42,
-                                height: _isRecordingVoice ? 52 : 42,
-                                margin: const EdgeInsets.only(right: 5),
+                                width: _isRecordingVoice ? 44 : 38,
+                                height: _isRecordingVoice ? 44 : 38,
+                                margin: const EdgeInsets.only(right: 4),
                                 decoration: BoxDecoration(
                                   gradient: LinearGradient(
                                     colors: _isRecordingVoice
@@ -5691,9 +5699,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                       : null,
                                 ),
                                 child: Icon(
-                                  _isRecordingVoice ? Icons.mic_rounded : Icons.mic_none_rounded,
+                                  _isRecordingVoice ? Icons.stop_rounded : Icons.mic_rounded,
                                   color: Colors.white,
-                                  size: _isRecordingVoice ? 24 : 20,
+                                  size: _isRecordingVoice ? 22 : 19,
                                 ),
                               ),
                             )
@@ -5701,9 +5709,9 @@ class _ChatScreenState extends State<ChatScreen> {
                               onTap: sendMessage,
                               onLongPress: _showScheduleMessageDialog,
                               child: Container(
-                                width: 42,
-                                height: 42,
-                                margin: const EdgeInsets.only(right: 5),
+                                width: 38,
+                                height: 38,
+                                margin: const EdgeInsets.only(right: 4),
                                 decoration: const BoxDecoration(
                                   gradient: LinearGradient(
                                     colors: [Color(0xFF0F766E), Color(0xFF149B9B)],
@@ -5713,7 +5721,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                 child: const Icon(
                                   Icons.near_me_rounded,
                                   color: Colors.white,
-                                  size: 20,
+                                  size: 19,
                                 ),
                               ),
                             ),
