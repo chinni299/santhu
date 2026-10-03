@@ -316,19 +316,38 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _getFormattedImageUrl(String? url) {
     if (url == null || url.trim().isEmpty || url.trim() == 'null') return null;
     String cleanUrl = url.trim();
+
+    // If it's already a full HTTP/HTTPS URL
+    if (cleanUrl.startsWith('http://') || cleanUrl.startsWith('https://')) {
+      cleanUrl = cleanUrl
+          .replaceAll('localhost:5000', ApiConfig.formattedHost)
+          .replaceAll('127.0.0.1:5000', ApiConfig.formattedHost)
+          .replaceAll('192.168.0.120:5000', ApiConfig.formattedHost)
+          .replaceAll('192.168.0.116:5000', ApiConfig.formattedHost)
+          .replaceAll('http://santhu-swuo.onrender.com', 'https://santhu-swuo.onrender.com');
+
+      if (cleanUrl.contains('/uploads/')) {
+        cleanUrl = cleanUrl.replaceAll('/uploads/', '/messages/attachments/file/');
+      }
+      return cleanUrl;
+    }
+
     if (cleanUrl.contains('/uploads/')) {
       cleanUrl = cleanUrl.replaceAll('/uploads/', '/messages/attachments/file/');
+    } else if (cleanUrl.startsWith('uploads/')) {
+      cleanUrl = cleanUrl.replaceAll('uploads/', '/messages/attachments/file/');
     }
-    if (cleanUrl.startsWith('/')) {
-      cleanUrl = '$baseUrl$cleanUrl';
+
+    if (!cleanUrl.startsWith('/')) {
+      if (!cleanUrl.startsWith('messages/attachments/file/')) {
+        cleanUrl = '/messages/attachments/file/$cleanUrl';
+      } else {
+        cleanUrl = '/$cleanUrl';
+      }
     }
-    cleanUrl = cleanUrl
-        .replaceAll('localhost:5000', ApiConfig.formattedHost)
-        .replaceAll('127.0.0.1:5000', ApiConfig.formattedHost)
-        .replaceAll('192.168.0.120:5000', ApiConfig.formattedHost)
-        .replaceAll('192.168.0.116:5000', ApiConfig.formattedHost)
-        .replaceAll('http://santhu-swuo.onrender.com', 'https://santhu-swuo.onrender.com');
-    return cleanUrl;
+
+    final fullUrl = '$baseUrl$cleanUrl';
+    return fullUrl;
   }
 
   Future<void> _saveImageToGallery(String imageUrl, {bool isLocalFile = false}) async {

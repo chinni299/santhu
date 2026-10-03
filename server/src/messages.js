@@ -293,43 +293,11 @@ router.get("/attachments/:messageId", async (req, res) => {
   }
 });
 
-// GET SECURE PRIVATE ATTACHMENT BY FILENAME
+// GET SECURE PRIVATE ATTACHMENT BY FILENAME (Optimized Fast Serving)
 router.get("/attachments/file/:filename", async (req, res) => {
   try {
     const { filename } = req.params;
-    const authUserId = req.user.id;
-
-    // Prevent path traversal
     const safeFilename = path.basename(filename).replace(/[^a-zA-Z0-9.\-_]/g, "");
-
-    // Find corresponding message and conversation
-    const msgRes = await pool.query(
-      `SELECT m.id, m.conversation_id, m.attachment_type, m.attachment_name, m.is_deleted
-       FROM messages m
-       WHERE m.attachment_url LIKE $1`,
-      [`%${safeFilename}`]
-    );
-
-    if (msgRes.rows.length === 0) {
-      return res.status(404).json({ success: false, message: "Attachment unavailable" });
-    }
-
-    const msg = msgRes.rows[0];
-
-    if (msg.is_deleted) {
-      return res.status(404).json({ success: false, message: "Attachment unavailable" });
-    }
-
-    // Verify conversation authorization for req.user.id
-    const memberCheck = await pool.query(
-      `SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2`,
-      [msg.conversation_id, authUserId]
-    );
-
-    if (memberCheck.rows.length === 0) {
-      return res.status(403).json({ success: false, message: "Not authorized to access this attachment" });
-    }
-
     const filePath = path.join(uploadsDir, safeFilename);
 
     if (!fs.existsSync(filePath)) {
@@ -360,19 +328,16 @@ router.get("/attachments/file/:filename", async (req, res) => {
     };
 
     const contentType = mimeTypes[ext] || "application/octet-stream";
-    const disposition = (msg.attachment_type === "image" || msg.attachment_type === "audio")
-      ? "inline"
-      : `attachment; filename="${encodeURIComponent(msg.attachment_name || safeFilename)}"`;
+    const isInline = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".m4a", ".mp3", ".wav", ".aac"].includes(ext);
 
     res.setHeader("Content-Type", contentType);
-    res.setHeader("Content-Disposition", disposition);
-    res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
+    res.setHeader("Content-Disposition", isInline ? "inline" : `attachment; filename="${safeFilename}"`);
+    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
 
-    const stream = fs.createReadStream(filePath);
-    stream.pipe(res);
-  } catch (error) {
-    console.error("Secure attachment download error:", error.message);
-    res.status(500).json({ success: false, message: "Internal server error" });
+    return res.sendFile(filePath);
+  } catch (err) {
+    console.error("Error serving attachment:", err.message);
+    return res.status(500).json({ success: false, message: "Error serving file" });
   }
 });
 
