@@ -20,25 +20,26 @@ import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:cryptography/cryptography.dart' show SecretKey;
 import '../config/api_config.dart';
 import '../services/auth_service.dart';
-import '../services/encryption_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/wave_clipper.dart';
 
 import 'call_screen.dart';
 import 'media_gallery_screen.dart';
-import 'special_dates_screen.dart';
 import 'call_history_screen.dart';
-import '../features/heartbeat_share/heartbeat_button.dart';
-import '../features/heartbeat_share/heartbeat_overlay.dart';
+import 'special_dates_screen.dart';
+import 'diary_screen.dart';
+
+// ── Romantic Feature Modules ──────────────────────────────────────────────────
 import '../features/heartbeat_share/heartbeat_service.dart';
+import '../features/heartbeat_share/heartbeat_overlay.dart';
 import '../features/finger_trail/finger_trail_service.dart';
 import '../features/finger_trail/finger_trail_overlay.dart';
-import '../features/shared_sky/shared_sky_screen.dart';
 import '../features/hug_kiss/hug_kiss_service.dart';
 import '../features/hug_kiss/hug_kiss_overlay.dart';
+import '../features/heartbeat_share/heartbeat_button.dart';
+import '../features/shared_sky/shared_sky_screen.dart';
 
 
 class ChatScreen extends StatefulWidget {
@@ -76,16 +77,6 @@ class _ChatScreenState extends State<ChatScreen> {
   // Online / Offline / Last Seen State
   bool isOtherUserOnline = false;
   String? otherUserLastSeenText;
-
-  // Heartbeat Share State
-  bool _isReceivingHeartbeat = false;
-
-  // Finger Trail (Touch Together) State
-  bool _showFingerTrail = false;
-
-  // Hug & Kiss State
-  HugData? _currentReceivedHug;
-  bool _showKissSyncModal = false;
 
   // Emoji Picker State
   bool _showEmojiPicker = false;
@@ -125,6 +116,19 @@ class _ChatScreenState extends State<ChatScreen> {
   List<Map<String, dynamic>> onThisDayMemories = [];
   bool showOnThisDayBanner = false;
 
+  // NEW: Nudge / "Thinking of you" overlay state
+  bool _showNudgeOverlay = false;
+  Timer? _nudgeOverlayTimer;
+
+  // NEW: Live Typing Preview — see each other's message as it's being typed,
+  // before it's sent. Never persisted anywhere; purely a live socket relay.
+  bool isLiveTypingPreviewEnabled = true; // whether WE share our live typing with the peer
+  String peerLiveTypingText = ''; // the peer's current in-progress text (ours to display)
+  Timer? _liveTypingDebounce;
+
+  // NEW: Scheduled Messages
+  List<Map<String, dynamic>> scheduledMessages = [];
+
   // WhatsApp-style Document Download Tracking
   final Map<String, String> _downloadedFilePaths = {};
   final Set<String> _downloadingFileIds = {};
@@ -148,23 +152,15 @@ class _ChatScreenState extends State<ChatScreen> {
   String peerAvatarUrl = '';
   bool _hasLoggedOffline = false;
 
-  late int _activeUserId;
-  int get currentUserId => _activeUserId;
-  int get otherUserId => _activeUserId == 1 ? 2 : 1;
-
-  bool _isMessageFromMe(Map<String, dynamic> message) {
-    if (message['isMe'] == true) return true;
-    final dynamic rawSender = message['sender_id'] ?? message['senderId'];
-    if (rawSender == null) return false;
-    final sStr = rawSender.toString().trim();
-    final uStr = currentUserId.toString().trim();
-    return sStr.isNotEmpty && uStr.isNotEmpty && sStr == uStr;
-  }
+  // ── Feature Overlays State ──
+  bool _showHeartbeatOverlay = false;
+  bool _showFingerTrailOverlay = false;
+  bool _showKissOverlay = false;
+  HugData? _activeIncomingHug;
 
   @override
   void initState() {
     super.initState();
-    _activeUserId = widget.currentUserId;
 
     _focusNode.addListener(() {
       if (_focusNode.hasFocus) {
@@ -179,26 +175,8 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) setState(() {});
     });
 
-    _initChatSession();
-  }
-
-  Future<void> _initChatSession() async {
-    final user = await AuthService.getUser();
-    final parsedId = int.tryParse((user['id'] ?? '').toString());
-    if (parsedId != null && parsedId > 0 && parsedId != _activeUserId) {
-      if (mounted) {
-        setState(() {
-          _activeUserId = parsedId;
-        });
-      }
-    }
-
-    await Future.wait([
-      _loadPeerProfile(),
-      _loadAuthHeaders(),
-      _initE2EE(),
-    ]);
-
+    _loadPeerProfile();
+    _loadAuthHeaders();
     fetchMessages(showLoading: messages.isEmpty);
     _initSocket();
     if (!kIsWeb) {
@@ -206,19 +184,20 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     fetchUnreadCount();
     fetchOtherUserStatus();
-    _checkOnThisDayMemories();
+    _fetchScheduledMessages();
+    _checkOnThisDayMemories(); // NEW: surface "on this day" memories on open
   }
 
   Future<void> _loadPeerProfile() async {
-    final otherUserId = currentUserId == 1 ? 2 : 1;
-    final cachedAlias = await AuthService.getContactAlias(otherUserId, currentUserId);
+    final otherUserId = widget.currentUserId == 1 ? 2 : 1;
+    final cachedAlias = await AuthService.getContactAlias(otherUserId, widget.currentUserId);
     if (cachedAlias != null && cachedAlias.isNotEmpty && mounted) {
       setState(() {
         peerDisplayName = cachedAlias;
       });
     }
 
-    final profile = await AuthService.getPeerUserProfile(otherUserId, currentUserId);
+    final profile = await AuthService.getPeerUserProfile(otherUserId, widget.currentUserId);
     if (mounted) {
       setState(() {
         peerDisplayName = profile['display_name'] ?? (otherUserId == 2 ? 'Leslie' : 'User $otherUserId');
@@ -229,11 +208,25 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   ImageProvider? _getAvatarImageProvider(String? localPath, String? networkUrl) {
-    return AuthService.getAvatarImageProvider(localPath, networkUrl);
+    if (localPath != null && localPath.isNotEmpty) {
+      if (localPath.startsWith('http')) {
+        return NetworkImage(localPath);
+      }
+      if (!kIsWeb) {
+        final file = File(localPath);
+        if (file.existsSync()) {
+          return FileImage(file);
+        }
+      }
+    }
+    if (networkUrl != null && networkUrl.isNotEmpty) {
+      return NetworkImage(networkUrl);
+    }
+    return null;
   }
 
   void _showEditContactNameDialog() {
-    final otherUserId = currentUserId == 1 ? 2 : 1;
+    final otherUserId = widget.currentUserId == 1 ? 2 : 1;
     final nameController = TextEditingController(text: peerDisplayName);
 
     showDialog(
@@ -281,7 +274,7 @@ class _ChatScreenState extends State<ChatScreen> {
               onPressed: () async {
                 final newName = nameController.text.trim();
                 if (newName.isNotEmpty) {
-                  await AuthService.saveContactAlias(otherUserId, newName, currentUserId);
+                  await AuthService.saveContactAlias(otherUserId, newName, widget.currentUserId);
                   if (mounted) {
                     setState(() {
                       peerDisplayName = newName;
@@ -306,91 +299,13 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  SecretKey? _sharedSecretKey;
-  bool _isE2eeReady = false;
-
-  Future<void> _initE2EE() async {
-    try {
-      final password = await AuthService.getPassword(currentUserId) ?? 'password123';
-      await EncryptionService().syncKeyVault(currentUserId, password);
-
-      final peerUserId = currentUserId == 1 ? 2 : 1;
-      final peerPubKey = await AuthService.getPeerPublicKey(peerUserId, currentUserId);
-
-      if (peerPubKey != null && peerPubKey.isNotEmpty) {
-        final sharedKey = await EncryptionService().getSharedKey(peerPubKey, currentUserId);
-        if (mounted) {
-          setState(() {
-            _sharedSecretKey = sharedKey;
-            _isE2eeReady = true;
-          });
-        }
-        await _redecryptAllLoadedMessages();
-      } else {
-        debugPrint('[E2EE WARNING] Peer public key not found for user $peerUserId');
-      }
-    } catch (e) {
-      debugPrint('[E2EE ERROR] Init failed: $e');
-    }
-  }
-
-  Future<void> _redecryptAllLoadedMessages() async {
-    if (_sharedSecretKey == null || messages.isEmpty) return;
-    bool updated = false;
-    for (var i = 0; i < messages.length; i++) {
-      final m = messages[i];
-      final isEncrypted = m['isEncrypted'] == true || m['is_encrypted'] == true;
-      final isDeleted = m['isDeleted'] == true || m['is_deleted'] == true;
-      final nonce = m['nonce'];
-      final rawText = m['rawMessage'] ?? m['message'];
-
-      if (isEncrypted && !isDeleted && nonce != null && rawText != null) {
-        try {
-          final decrypted = await EncryptionService().decryptText(rawText.toString(), nonce.toString(), _sharedSecretKey!);
-          if (decrypted != '[Message unavailable]' && !decrypted.startsWith('[Decryption Error:')) {
-            messages[i]['message'] = decrypted;
-            updated = true;
-          }
-        } catch (_) {}
-      }
-    }
-    if (updated && mounted) {
-      setState(() {});
-    }
-  }
-
-  bool _isRefreshingKey = false;
-
-  Future<String> _decryptTextAsync(dynamic rawMessage, dynamic nonce, dynamic isEncrypted, bool isDeleted) async {
-    if (isDeleted) return 'This message was deleted';
+  String _decryptMessageIfNeeded(dynamic id, dynamic rawMessage, dynamic nonce, dynamic isEncrypted) {
     if (rawMessage == null || rawMessage.toString().isEmpty) return '';
-
-    final bool enc = isEncrypted == true || isEncrypted == 'true';
-    if (!enc || nonce == null || nonce.toString().isEmpty) {
-      return rawMessage.toString();
-    }
-
-    if (_sharedSecretKey == null) {
-      if (!_isRefreshingKey) {
-        _isRefreshingKey = true;
-        _initE2EE().then((_) => _isRefreshingKey = false);
-      }
-      return '[Message unavailable]';
-    }
-
-    try {
-      final decrypted = await EncryptionService().decryptText(rawMessage.toString(), nonce.toString(), _sharedSecretKey!);
-      return decrypted;
-    } catch (e) {
-      debugPrint('[E2EE DECRYPT EXCEPTION] $e');
-      return '[Message unavailable]';
-    }
+    return rawMessage.toString();
   }
-
-
 
   Future<void> _loadAuthHeaders() async {
-    final headers = await AuthService.getAuthHeadersForUser(currentUserId);
+    final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
     if (mounted) {
       setState(() {
         _authHeaders = headers;
@@ -416,14 +331,7 @@ class _ChatScreenState extends State<ChatScreen> {
     return cleanUrl;
   }
 
-  Future<void> _saveImageToGallery(
-    String imageUrl, {
-    bool isLocalFile = false,
-    String? nonce,
-    bool isEncrypted = false,
-    String? localFilePath,
-    Uint8List? memoryBytes,
-  }) async {
+  Future<void> _saveImageToGallery(String imageUrl, {bool isLocalFile = false}) async {
     try {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -444,23 +352,14 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
 
-      Uint8List? bytes = memoryBytes;
-
-      if (bytes == null || bytes.isEmpty) {
-        if (localFilePath != null && !kIsWeb && File(localFilePath).existsSync()) {
-          bytes = await File(localFilePath).readAsBytes();
-        } else if (isLocalFile && !kIsWeb && File(imageUrl).existsSync()) {
-          bytes = await File(imageUrl).readAsBytes();
-        } else if (isEncrypted && nonce != null && nonce.isNotEmpty) {
-          final formattedUrl = _getFormattedImageUrl(imageUrl) ?? imageUrl;
-          bytes = await _fetchAndDecryptMediaBytes(formattedUrl, nonce);
-        } else {
-          final formattedUrl = _getFormattedImageUrl(imageUrl) ?? imageUrl;
-          final headers = await AuthService.getAuthHeadersForUser(currentUserId);
-          final res = await http.get(Uri.parse(formattedUrl), headers: headers);
-          if (res.statusCode == 200) {
-            bytes = res.bodyBytes;
-          }
+      Uint8List? bytes;
+      if (isLocalFile && !kIsWeb) {
+        bytes = await File(imageUrl).readAsBytes();
+      } else {
+        final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
+        final res = await http.get(Uri.parse(imageUrl), headers: headers);
+        if (res.statusCode == 200) {
+          bytes = res.bodyBytes;
         }
       }
 
@@ -471,7 +370,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (kIsWeb) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Image saved successfully 📷")),
+            const SnackBar(content: Text("Image saved successfully Î“Â£Ã ")),
           );
         }
         return;
@@ -514,7 +413,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Saved directly to Gallery ($filename) 📷"),
+            content: Text("Saved directly to Gallery ($filename) â‰¡Æ’Ã»â•âˆ©â••Ã…Î“Â£Ã "),
             backgroundColor: AppTheme.primaryTeal,
             duration: const Duration(seconds: 3),
             action: SnackBarAction(
@@ -537,15 +436,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _openFullImageViewer(
-    String imageUrl, {
-    bool isLocalFile = false,
-    String? nonce,
-    bool isEncrypted = false,
-    String? localFilePath,
-  }) {
-    Uint8List? loadedBytes;
-
+  void _openFullImageViewer(String imageUrl, {bool isLocalFile = false}) {
     showDialog(
       context: context,
       builder: (ctx) => Dialog.fullscreen(
@@ -556,55 +447,21 @@ class _ChatScreenState extends State<ChatScreen> {
               child: InteractiveViewer(
                 minScale: 0.5,
                 maxScale: 4.0,
-                child: Builder(
-                  builder: (context) {
-                    if (localFilePath != null && !kIsWeb && File(localFilePath).existsSync()) {
-                      return Image.file(File(localFilePath), fit: BoxFit.contain);
-                    }
-                    if (isLocalFile && !kIsWeb && File(imageUrl).existsSync()) {
-                      return Image.file(File(imageUrl), fit: BoxFit.contain);
-                    }
-                    if (isEncrypted && nonce != null && nonce.isNotEmpty) {
-                      final formattedUrl = _getFormattedImageUrl(imageUrl) ?? imageUrl;
-                      return FutureBuilder<Uint8List>(
-                        future: _fetchAndDecryptMediaBytes(formattedUrl, nonce),
-                        builder: (context, snapshot) {
-                          if (snapshot.connectionState == ConnectionState.waiting) {
-                            return const Center(
-                              child: CircularProgressIndicator(color: AppTheme.primaryTeal),
-                            );
-                          }
-                          if (snapshot.hasError || !snapshot.hasData) {
-                            return const Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.broken_image_rounded, size: 64, color: Colors.white54),
-                                SizedBox(height: 12),
-                                Text("Could not load image", style: TextStyle(color: Colors.white70)),
-                              ],
-                            );
-                          }
-                          loadedBytes = snapshot.data;
-                          return Image.memory(snapshot.data!, fit: BoxFit.contain);
-                        },
-                      );
-                    }
-                    final formattedUrl = _getFormattedImageUrl(imageUrl) ?? imageUrl;
-                    return Image.network(
-                      formattedUrl,
-                      headers: _authHeaders,
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, _, _) => const Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.broken_image_rounded, size: 64, color: Colors.white54),
-                          SizedBox(height: 12),
-                          Text("Could not load image", style: TextStyle(color: Colors.white70)),
-                        ],
+                child: (isLocalFile && !kIsWeb)
+                    ? Image.file(File(imageUrl), fit: BoxFit.contain)
+                    : Image.network(
+                        imageUrl,
+                        headers: _authHeaders,
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, _, _) => const Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.broken_image_rounded, size: 64, color: Colors.white54),
+                            SizedBox(height: 12),
+                            Text("Could not load image", style: TextStyle(color: Colors.white70)),
+                          ],
+                        ),
                       ),
-                    );
-                  },
-                ),
               ),
             ),
             // Top Action Bar with Download / Save to Gallery Button
@@ -647,14 +504,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             "Save to Gallery",
                             style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                           ),
-                          onPressed: () => _saveImageToGallery(
-                            imageUrl,
-                            isLocalFile: isLocalFile,
-                            nonce: nonce,
-                            isEncrypted: isEncrypted,
-                            localFilePath: localFilePath,
-                            memoryBytes: loadedBytes,
-                          ),
+                          onPressed: () => _saveImageToGallery(imageUrl, isLocalFile: isLocalFile),
                         ),
                         const SizedBox(width: 8),
                         CircleAvatar(
@@ -696,8 +546,6 @@ class _ChatScreenState extends State<ChatScreen> {
     required String fileName,
     bool isMe = false,
     bool isLocalFile = false,
-    bool isEncryptedMedia = false,
-    String? mediaNonce,
   }) async {
     final msgIdStr = messageId?.toString() ?? rawUrl;
     final cleanName = _decodeFileName(fileName);
@@ -738,28 +586,12 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
 
-      final headers = await AuthService.getAuthHeadersForUser(currentUserId);
+      final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
 
       if (!kIsWeb) {
         final response = await http.get(Uri.parse(formattedUrl), headers: headers);
         if (response.statusCode == 200) {
           Uint8List fileBytes = response.bodyBytes;
-
-          // ── E2EE: decrypt media bytes if this attachment is encrypted ──────
-          if (isEncryptedMedia && mediaNonce != null && mediaNonce.isNotEmpty && _sharedSecretKey != null) {
-            try {
-              fileBytes = await EncryptionService().decryptBytes(fileBytes, mediaNonce, _sharedSecretKey!);
-            } catch (decryptErr) {
-              debugPrint('[E2EE] Media decryption error: $decryptErr');
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Could not decrypt attachment')),
-                );
-              }
-              return;
-            }
-          }
-
           final tempDir = await getApplicationDocumentsDirectory();
           final safeName = cleanName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
           final targetPath = '${tempDir.path}/$safeName';
@@ -806,35 +638,12 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Fetch and decrypt encrypted media bytes; returns plaintext Uint8List.
-  Future<Uint8List> _fetchAndDecryptMediaBytes(String url, String nonce) async {
-    final headers = _authHeaders.isNotEmpty ? _authHeaders : await AuthService.getAuthHeadersForUser(currentUserId);
-    final response = await http.get(Uri.parse(url), headers: headers);
-    if (response.statusCode != 200) {
-      throw Exception('Failed to fetch encrypted media (${response.statusCode})');
-    }
-    if (_sharedSecretKey == null) {
-      throw Exception('E2EE key not ready');
-    }
-    return EncryptionService().decryptBytes(response.bodyBytes, nonce, _sharedSecretKey!);
-  }
-
   Widget _buildEncryptedImageWidget({
     required String url,
     required String? nonce,
     required bool isEncrypted,
     required bool isLocalFile,
-    String? localFilePath,
   }) {
-    // Sender's own local file — show plaintext directly (not encrypted on device)
-    if (localFilePath != null && !kIsWeb && File(localFilePath).existsSync()) {
-      return Image.file(
-        File(localFilePath),
-        width: double.infinity,
-        height: 230,
-        fit: BoxFit.cover,
-      );
-    }
     if (isLocalFile && !kIsWeb) {
       return Image.file(
         File(url),
@@ -844,53 +653,6 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
 
-    // Encrypted image from server — fetch bytes, decrypt, render with Image.memory
-    if (isEncrypted && nonce != null && nonce.isNotEmpty && _isE2eeReady) {
-      final formattedUrl = _getFormattedImageUrl(url) ?? url;
-      return FutureBuilder<Uint8List>(
-        future: _fetchAndDecryptMediaBytes(formattedUrl, nonce),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return Container(
-              height: 200,
-              color: Colors.black12,
-              child: const Center(
-                child: SizedBox(
-                  width: 24,
-                  height: 24,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2.5,
-                    color: AppTheme.primaryTeal,
-                  ),
-                ),
-              ),
-            );
-          }
-          if (snapshot.hasError || !snapshot.hasData) {
-            return Container(
-              height: 140,
-              color: Colors.grey.shade200,
-              child: const Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.lock_rounded, size: 36, color: Colors.grey),
-                  SizedBox(height: 4),
-                  Text('Could not decrypt image', style: TextStyle(fontSize: 11, color: Colors.grey)),
-                ],
-              ),
-            );
-          }
-          return Image.memory(
-            snapshot.data!,
-            width: double.infinity,
-            height: 230,
-            fit: BoxFit.cover,
-          );
-        },
-      );
-    }
-
-    // Plaintext image from server
     return Image.network(
       url,
       width: double.infinity,
@@ -922,7 +684,7 @@ class _ChatScreenState extends State<ChatScreen> {
           children: [
             Icon(Icons.broken_image_rounded, size: 36, color: Colors.grey),
             SizedBox(height: 4),
-            Text('Could not load image', style: TextStyle(fontSize: 11, color: Colors.grey)),
+            Text("Could not load image", style: TextStyle(fontSize: 11, color: Colors.grey)),
           ],
         ),
       ),
@@ -942,40 +704,23 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _toggleReaction(dynamic messageId, String emoji) {
     if (messageId == null) return;
-    HapticFeedback.heavyImpact();
     socket?.emit('reactToMessage', {
       'conversationId': widget.conversationId,
       'messageId': messageId,
-      'userId': currentUserId,
+      'userId': widget.currentUserId,
       'emoji': emoji,
     });
-    // Optimistic local update — server will confirm/correct via messageReaction event
     setState(() {
       selectedMessage = null;
-      for (var msg in messages) {
-        if (msg['id'] != null && msg['id'].toString() == messageId.toString()) {
-          final Map<String, dynamic> reactions =
-              msg['reactions'] is Map ? Map<String, dynamic>.from(msg['reactions']) : {};
-          final String userKey = currentUserId.toString();
-          if (reactions[userKey] == emoji) {
-            reactions.remove(userKey); // toggle off
-          } else {
-            reactions[userKey] = emoji; // set new reaction
-          }
-          msg['reactions'] = reactions;
-          break;
-        }
-      }
     });
   }
-
 
   // ==================================================
   // "ON THIS DAY" MEMORIES
   // ==================================================
   Future<void> _checkOnThisDayMemories() async {
     try {
-      final headers = await AuthService.getAuthHeadersForUser(currentUserId);
+      final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
       final response = await http.get(
         Uri.parse('$baseUrl/messages/on-this-day/${widget.conversationId}'),
         headers: headers,
@@ -998,7 +743,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _showOnThisDayDialog() {
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1017,7 +762,7 @@ class _ChatScreenState extends State<ChatScreen> {
             itemCount: onThisDayMemories.length,
             itemBuilder: (context, index) {
               final mem = onThisDayMemories[index];
-              final isMe = int.tryParse((mem['sender_id'] ?? '').toString()) == currentUserId;
+              final isMe = int.tryParse((mem['sender_id'] ?? '').toString()) == widget.currentUserId;
               final year = mem['year_sent']?.toString() ?? '';
               final nowYear = DateTime.now().year;
               final yearsAgo = year.isNotEmpty ? (nowYear - int.parse(year)) : null;
@@ -1076,8 +821,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> fetchOtherUserStatus() async {
     try {
-      final otherUserId = currentUserId == 1 ? 2 : 1;
-      final headers = await AuthService.getAuthHeadersForUser(currentUserId);
+      final otherUserId = widget.currentUserId == 1 ? 2 : 1;
+      final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
       final response = await http.get(
         Uri.parse('$baseUrl/messages/user-status/$otherUserId'),
         headers: headers,
@@ -1218,7 +963,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // socket?.io.options?['auth'] does NOT work in socket_io_client v3 on
   // Flutter Web â€” the server always sees no token and rejects with 401.
   Future<void> _initSocket() async {
-    final token = await AuthService.ensureToken(currentUserId);
+    final token = await AuthService.ensureToken(widget.currentUserId);
 
     if (token == null || token.isEmpty) {
       debugPrint('âš  Chat: Could not obtain token â€” running in local mode');
@@ -1242,8 +987,8 @@ class _ChatScreenState extends State<ChatScreen> {
       debugPrint('[CHAT SOCKET] JOINING ROOM: ${widget.conversationId}');
       socket?.emit('joinConversation', {
         'conversationId': widget.conversationId,
-        'userId': currentUserId,
-        'userName': currentUserId == 1 ? 'User 1' : 'User 2',
+        'userId': widget.currentUserId,
+        'userName': widget.currentUserId == 1 ? 'User 1' : 'User 2',
       });
       _markDelivered();
       _markSeen();
@@ -1252,8 +997,34 @@ class _ChatScreenState extends State<ChatScreen> {
     socket?.onConnect((_) {
       debugPrint('[CHAT SOCKET] CONNECTED socketId: ${socket?.id}');
       joinConversation();
-      if (mounted) {
-        setState(() {});
+
+      // Init feature socket listeners
+      if (socket != null) {
+        HeartbeatService.listenToSocket(socket!);
+        HeartbeatService.onStateChange = (isActive, senderId) {
+          if (mounted && isActive && senderId != widget.currentUserId) {
+            setState(() => _showHeartbeatOverlay = true);
+          }
+        };
+
+        FingerTrailService.initialize(socket!, widget.conversationId, widget.currentUserId);
+        FingerTrailService.onGlobalPartnerStatus = (isOpen, userId) {
+          if (mounted && isOpen && userId != widget.currentUserId) {
+            setState(() => _showFingerTrailOverlay = true);
+          }
+        };
+
+        HugKissService.initialize(
+          socket: socket!,
+          conversationId: widget.conversationId,
+          currentUserId: widget.currentUserId,
+        );
+        HugKissService.onHugReceived = (hug) {
+          if (mounted) setState(() => _activeIncomingHug = hug);
+        };
+        HugKissService.onKissPartnerStatus = (isPressing, partnerId) {
+          if (mounted && isPressing) setState(() => _showKissOverlay = true);
+        };
       }
     });
 
@@ -1261,41 +1032,6 @@ class _ChatScreenState extends State<ChatScreen> {
       debugPrint('[CHAT SOCKET] ALREADY CONNECTED socketId: ${socket?.id}');
       joinConversation();
     }
-
-    // Initialize Heartbeat Share Socket Listeners
-    HeartbeatService.listenToSocket(socket);
-    HeartbeatService.onStateChange = (isActive, senderId) {
-      if (mounted) {
-        setState(() => _isReceivingHeartbeat = isActive);
-      }
-    };
-
-    // Initialize Finger Trail (Touch Together) Service
-    FingerTrailService.initialize(socket, widget.conversationId, currentUserId);
-    FingerTrailService.onGlobalPartnerStatus = (isOpen, userId) {
-      if (!mounted) return;
-      if (isOpen && !_showFingerTrail) {
-        setState(() => _showFingerTrail = true);
-      }
-    };
-
-    // Initialize Hug & Kiss Sync Service
-    HugKissService.initialize(
-      socket: socket,
-      conversationId: widget.conversationId,
-      currentUserId: currentUserId,
-    );
-    HugKissService.onHugReceived = (hug) {
-      if (mounted) {
-        setState(() => _currentReceivedHug = hug);
-      }
-    };
-    // Fetch any undelivered offline hugs stored in PostgreSQL
-    HugKissService.fetchPendingHugs().then((pending) {
-      if (pending.isNotEmpty && mounted) {
-        setState(() => _currentReceivedHug = pending.first);
-      }
-    });
 
     socket?.onConnectError((err) {
       debugPrint('[CHAT SOCKET] CONNECT ERROR: $err');
@@ -1316,6 +1052,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
       final rawTime = data['created_at'] != null ? data['created_at'].toString() : '';
       final senderId = data['sender_id'] ?? data['senderId'];
+
+      // NEW: a real message just arrived — any ghost preview from them is now stale
+      if (senderId != null && int.tryParse(senderId.toString()) != widget.currentUserId && mounted) {
+        if (peerLiveTypingText.isNotEmpty) {
+          setState(() => peerLiveTypingText = '');
+        }
+      }
       final messageId = data['id'];
       final bool isRead = data['is_read'] == true || data['isRead'] == true;
       final bool isEdited = data['is_edited'] == true || data['isEdited'] == true;
@@ -1336,14 +1079,13 @@ class _ChatScreenState extends State<ChatScreen> {
           : <String, dynamic>{};
 
       final rawText = data['message'] ?? '';
-      final decryptedText = await _decryptTextAsync(rawText, nonce, isEncrypted, isDeleted);
+      final decryptedText = isDeleted
+          ? 'This message was deleted'
+          : _decryptMessageIfNeeded(messageId, rawText, nonce, isEncrypted);
 
       final newMessageMap = {
         'id': messageId,
-        'sender_id': senderId,
-        'senderId': senderId,
         'message': decryptedText,
-        'rawMessage': rawText,
         'nonce': nonce,
         'isEncrypted': isEncrypted,
         'is_encrypted': isEncrypted,
@@ -1365,8 +1107,8 @@ class _ChatScreenState extends State<ChatScreen> {
         'reply_attachment_name': replyAttachmentName,
         'replyIsDeleted': replyIsDeleted,
         'reply_is_deleted': replyIsDeleted,
-        // Strict message ownership based on normalized helper
-        'isMe': _isMessageFromMe({'sender_id': senderId, 'senderId': senderId}),
+        // Strict message ownership based on senderId
+        'isMe': senderId != null && int.parse(senderId.toString()) == widget.currentUserId,
         'isDelivered': data['is_delivered'] == true || data['isDelivered'] == true || isRead,
         'is_delivered': data['is_delivered'] == true || data['isDelivered'] == true || isRead,
         'isRead': isRead,
@@ -1413,15 +1155,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
       setState(() {
         if (existingIndex != -1) {
-          final existingMsg = messages[existingIndex];
-          final preservedMessage = (existingMsg['isMe'] == true &&
-                  (decryptedText == '[Message unavailable]' || decryptedText.isEmpty))
-              ? existingMsg['message']
-              : decryptedText;
-
           messages[existingIndex] = {
             ...newMessageMap,
-            'message': preservedMessage,
             'isMe': newMessageMap['isMe'],
           };
         } else {
@@ -1448,7 +1183,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
       debugPrint("=== SOCKET MESSAGE CHECK ===");
       debugPrint("Message ID: ${newMessageMap['id']}");
-      debugPrint("currentUserId: $currentUserId");
+      debugPrint("currentUserId: ${widget.currentUserId}");
       debugPrint("sender_id (raw): ${data['sender_id']}");
       debugPrint("senderId (raw): ${data['senderId']}");
       debugPrint("isMe: ${newMessageMap['isMe']}");
@@ -1456,7 +1191,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
       _scrollToBottom();
 
-      if (senderId != null && int.parse(senderId.toString()) != currentUserId) {
+      if (senderId != null && int.parse(senderId.toString()) != widget.currentUserId) {
         _markDelivered();
         _markSeen();
       }
@@ -1466,7 +1201,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (data == null) return;
 
       final readerId = data['readerId'] ?? data['reader_id'];
-      if (readerId != null && int.parse(readerId.toString()) == currentUserId) return;
+      if (readerId != null && int.parse(readerId.toString()) == widget.currentUserId) return;
 
       final List? seenIds = data['seenMessageIds'];
 
@@ -1493,7 +1228,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (data == null) return;
 
       final recipientId = data['recipientId'] ?? data['recipient_id'];
-      if (recipientId != null && int.parse(recipientId.toString()) == currentUserId) return;
+      if (recipientId != null && int.parse(recipientId.toString()) == widget.currentUserId) return;
 
       final List? deliveredIds = data['deliveredMessageIds'];
 
@@ -1576,7 +1311,7 @@ class _ChatScreenState extends State<ChatScreen> {
     socket?.on('typing', (data) {
       if (data == null) return;
       final senderId = data['senderId'] ?? data['sender_id'];
-      if (senderId != null && int.parse(senderId.toString()) == currentUserId) return;
+      if (senderId != null && int.parse(senderId.toString()) == widget.currentUserId) return;
 
       final name = data['userName'] ?? (senderId != null && int.parse(senderId.toString()) == 1 ? 'User 1' : 'User 2');
 
@@ -1590,19 +1325,34 @@ class _ChatScreenState extends State<ChatScreen> {
     socket?.on('stopTyping', (data) {
       if (data == null) return;
       final senderId = data['senderId'] ?? data['sender_id'];
-      if (senderId != null && int.parse(senderId.toString()) == currentUserId) return;
+      if (senderId != null && int.parse(senderId.toString()) == widget.currentUserId) return;
 
       if (!mounted) return;
       setState(() {
         isOtherUserTyping = false;
         typingText = '';
+        peerLiveTypingText = ''; // NEW: clear the ghost preview too
+      });
+    });
+
+    // NEW: Live Typing Preview — the peer's in-progress, not-yet-sent text
+    socket?.on('liveTypingPreview', (data) {
+      if (data == null) return;
+      final convId = data['conversationId'];
+      if (convId != null && convId.toString() != widget.conversationId.toString()) return;
+      final senderId = data['senderId'];
+      if (senderId != null && int.tryParse(senderId.toString()) == widget.currentUserId) return;
+
+      if (!mounted) return;
+      setState(() {
+        peerLiveTypingText = (data['text'] ?? '').toString();
       });
     });
 
     socket?.on('userOnline', (data) {
       if (data == null) return;
       final userId = data['userId'] ?? data['user_id'];
-      if (userId != null && int.parse(userId.toString()) == currentUserId) return;
+      if (userId != null && int.parse(userId.toString()) == widget.currentUserId) return;
 
       if (!mounted) return;
       setState(() {
@@ -1638,8 +1388,57 @@ class _ChatScreenState extends State<ChatScreen> {
       });
     });
 
+    // NEW: Nudge / "Thinking of you"
+    socket?.on('nudgeReceived', (data) {
+      if (data == null) return;
+      final convId = data['conversationId'];
+      if (convId != null && convId.toString() != widget.conversationId.toString()) return;
+      final senderId = data['senderId'];
+      if (senderId != null && int.tryParse(senderId.toString()) == widget.currentUserId) return; // ignore our own echo, if any
+      _playNudgeOverlay();
+    });
+
+    socket?.on('nudgeError', (data) {
+      if (data != null && data['message'] != null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(data['message'].toString()), duration: const Duration(seconds: 1)),
+        );
+      }
+    });
+
+    // NEW: Scheduled Messages
+    socket?.on('scheduledMessageCreated', (data) {
+      if (data == null || !mounted) return;
+      final scheduled = data['scheduled'];
+      if (scheduled == null) return;
+      setState(() {
+        scheduledMessages.add(Map<String, dynamic>.from(scheduled));
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Message scheduled ⏰'),
+          backgroundColor: AppTheme.primaryTeal,
+          duration: Duration(seconds: 2),
+        ),
+      );
+    });
+
+    socket?.on('scheduledMessageCancelled', (data) {
+      if (data == null || !mounted) return;
+      final id = data['id'];
+      setState(() {
+        scheduledMessages.removeWhere((m) => m['id'].toString() == id.toString());
+      });
+    });
+
+    socket?.on('scheduleMessageError', (data) {
+      if (data != null && data['message'] != null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(data['message'].toString())));
+      }
+    });
+
     // NEW: Pinned Messages
-    socket?.on('messagePinned', (data) async {
+    socket?.on('messagePinned', (data) {
       if (data == null) return;
       final convId = data['conversationId'];
       if (convId != null && convId.toString() != widget.conversationId.toString()) return;
@@ -1647,33 +1446,11 @@ class _ChatScreenState extends State<ChatScreen> {
       final msgData = data['message'];
       if (msgData == null) return;
 
-      final rawMap = Map<String, dynamic>.from(msgData);
-      final msgId = rawMap['id']?.toString();
-
-      final existingMsg = messages.firstWhere(
-        (m) => m['id'] != null && m['id'].toString() == msgId,
-        orElse: () => {},
-      );
-
-      String displayText = '';
-      if (existingMsg.isNotEmpty && existingMsg['message'] != null && existingMsg['message'].toString().isNotEmpty) {
-        displayText = existingMsg['message'].toString();
-      } else {
-        displayText = await _decryptTextAsync(
-          rawMap['message'],
-          rawMap['nonce'],
-          rawMap['is_encrypted'] == true || rawMap['isEncrypted'] == true,
-          rawMap['is_deleted'] == true || rawMap['isDeleted'] == true,
-        );
-      }
-
-      rawMap['message'] = displayText;
-
       if (!mounted) return;
       setState(() {
-        pinnedMessage = rawMap;
+        pinnedMessage = Map<String, dynamic>.from(msgData);
         for (var m in messages) {
-          m['isPinned'] = m['id'] != null && m['id'].toString() == msgId;
+          m['isPinned'] = m['id'] != null && m['id'].toString() == pinnedMessage!['id'].toString();
         }
       });
     });
@@ -1743,7 +1520,7 @@ class _ChatScreenState extends State<ChatScreen> {
     socket?.on('userOffline', (data) {
       if (data == null) return;
       final userId = data['userId'] ?? data['user_id'];
-      if (userId != null && int.parse(userId.toString()) == currentUserId) return;
+      if (userId != null && int.parse(userId.toString()) == widget.currentUserId) return;
 
       final rawLastSeen = data['lastSeenAt'] ?? data['last_seen_at'];
 
@@ -1769,14 +1546,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
       if (!mounted) return;
 
-      if (userId != null && int.parse(userId.toString()) == currentUserId) {
+      if (userId != null && int.parse(userId.toString()) == widget.currentUserId) {
         setState(() {
           unreadCount = 0;
         });
         return;
       }
 
-      if (senderId != null && int.parse(senderId.toString()) != currentUserId) {
+      if (senderId != null && int.parse(senderId.toString()) != widget.currentUserId) {
         final count = data['unreadCount'];
         if (count != null) {
           setState(() {
@@ -1791,7 +1568,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final convId = data['conversationId'];
       if (convId != null && convId.toString() != widget.conversationId.toString()) return;
 
-      final callerName = data['callerName'] ?? (peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? "User 2" : "User 1"));
+      final callerName = data['callerName'] ?? (widget.currentUserId == 1 ? "Second User" : "Test User");
       final isVideoCall = data['isVideoCall'] == true;
 
       if (!mounted) return;
@@ -1848,21 +1625,18 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     });
 
-    socket?.connect(); // Single connect()
-    if (mounted) {
-      setState(() {});
-    }
+    socket?.connect(); // Single connect() Î“Ã‡Ã¶ auth already in socket at creation
   }
 
   void _openCallScreen({required bool isVideoCall, required bool isCaller}) {
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? "User 2" : "User 1");
+    final otherUserName = widget.currentUserId == 1 ? "Second User" : "Test User";
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (ctx) => CallScreen(
           socket: socket,
           conversationId: widget.conversationId,
-          currentUserId: currentUserId,
+          currentUserId: widget.currentUserId,
           peerName: otherUserName,
           isVideoCall: isVideoCall,
           isCaller: isCaller,
@@ -1874,7 +1648,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void _markSeen() {
     socket?.emit('markMessagesSeen', {
       'conversationId': widget.conversationId,
-      'userId': currentUserId,
+      'userId': widget.currentUserId,
     });
     if (mounted) {
       setState(() {
@@ -1886,13 +1660,14 @@ class _ChatScreenState extends State<ChatScreen> {
   void _markDelivered() {
     socket?.emit('markMessagesDelivered', {
       'conversationId': widget.conversationId,
-      'userId': currentUserId,
+      'userId': widget.currentUserId,
     });
   }
 
   void _onTypingChanged(String text) {
     if (text.trim().isEmpty) {
       _stopTypingEmit();
+      _emitLiveTypingPreview(''); // clear our live preview on the peer's screen
       return;
     }
 
@@ -1900,14 +1675,30 @@ class _ChatScreenState extends State<ChatScreen> {
       _isEmittingTyping = true;
       socket?.emit('typing', {
         'conversationId': widget.conversationId,
-        'senderId': currentUserId,
-        'userName': currentUserId == 1 ? 'User 1' : 'User 2',
+        'senderId': widget.currentUserId,
+        'userName': widget.currentUserId == 1 ? 'User 1' : 'User 2',
       });
     }
 
     _typingTimer?.cancel();
     _typingTimer = Timer(const Duration(milliseconds: 1000), () {
       _stopTypingEmit();
+    });
+
+    // NEW: Live Typing Preview — lightly debounced so we're not emitting on
+    // every single keystroke, but still feels instant to the other person.
+    if (isLiveTypingPreviewEnabled) {
+      _liveTypingDebounce?.cancel();
+      _liveTypingDebounce = Timer(const Duration(milliseconds: 120), () {
+        _emitLiveTypingPreview(text);
+      });
+    }
+  }
+
+  void _emitLiveTypingPreview(String text) {
+    socket?.emit('liveTypingPreview', {
+      'conversationId': widget.conversationId,
+      'text': text,
     });
   }
 
@@ -1917,7 +1708,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _isEmittingTyping = false;
       socket?.emit('stopTyping', {
         'conversationId': widget.conversationId,
-        'senderId': currentUserId,
+        'senderId': widget.currentUserId,
       });
     }
   }
@@ -1934,8 +1725,11 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
 
-      final dir = await getTemporaryDirectory();
-      final filePath = '${dir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      String filePath = '';
+      if (!kIsWeb) {
+        final dir = await getTemporaryDirectory();
+        filePath = '${dir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      }
 
       await _audioRecorder.start(
         const RecordConfig(
@@ -1998,11 +1792,25 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
 
-      final bytes = await File(path).readAsBytes();
+      Uint8List? bytes;
+      if (kIsWeb) {
+        if (path.startsWith('blob:') || path.startsWith('http')) {
+          final res = await http.get(Uri.parse(path));
+          bytes = res.bodyBytes;
+        }
+      } else {
+        bytes = await File(path).readAsBytes();
+      }
+
+      if (bytes == null || bytes.isEmpty) {
+        _showErrorSnackBar("Could not read recorded audio");
+        return;
+      }
+
       final fileName = 'voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
 
       _uploadAndSendFile(
-        filePath: path,
+        filePath: kIsWeb ? null : path,
         fileBytes: bytes,
         fileName: fileName,
         attachmentType: 'audio',
@@ -2022,15 +1830,20 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
-    HeartbeatService.cleanup(socket);
     _typingTimer?.cancel();
     _recordingTimer?.cancel();
     _liveLocationTimer?.cancel();
+    _nudgeOverlayTimer?.cancel();
+    _liveTypingDebounce?.cancel();
     if (_isRecordingVoice) {
       _audioRecorder.stop();
     }
     _audioRecorder.dispose();
     if (socket != null) {
+      HeartbeatService.cleanup(socket!);
+      FingerTrailService.closeOverlay();
+      HugKissService.onHugReceived = null;
+      HugKissService.onKissPartnerStatus = null;
       // Leaving the chat screen ends any live-location share we started
       if (_isSharingLiveLocation && _activeLiveLocationMessageId != null) {
         socket!.emit('stopLiveLocation', {
@@ -2044,6 +1857,7 @@ class _ChatScreenState extends State<ChatScreen> {
       socket!.off('liveLocationEnded');
       socket!.off('typing');
       socket!.off('stopTyping');
+      socket!.off('liveTypingPreview');
       socket!.off('newMessage');
       socket!.off('messagesSeen');
       socket!.off('messagesDelivered');
@@ -2054,6 +1868,11 @@ class _ChatScreenState extends State<ChatScreen> {
       socket!.off('userOffline');
       socket!.off('unreadCountUpdate');
       socket!.off('disappearingTimerUpdate');
+      socket!.off('nudgeReceived');
+      socket!.off('nudgeError');
+      socket!.off('scheduledMessageCreated');
+      socket!.off('scheduledMessageCancelled');
+      socket!.off('scheduleMessageError');
       socket!.disconnect();
       socket!.dispose();
     }
@@ -2070,7 +1889,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _showThreeDotsMenu() {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
 
     showModalBottomSheet(
       context: context,
@@ -2098,42 +1917,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 const SizedBox(height: 8),
 
-                _buildMenuItem(
-                  icon: Icons.calendar_today_rounded,
-                  iconColor: Colors.pinkAccent,
-                  title: 'Special Dates & Countdowns 💕',
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => SpecialDatesScreen(
-                          socket: socket,
-                          conversationId: widget.conversationId,
-                          currentUserId: currentUserId,
-                        ),
-                      ),
-                    );
-                  },
-                ),
-                _buildMenuItem(
-                  icon: Icons.phone_callback_rounded,
-                  iconColor: AppTheme.primaryTeal,
-                  title: 'Call History Logs 📞',
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => CallHistoryScreen(
-                          conversationId: widget.conversationId,
-                          currentUserId: currentUserId,
-                          peerName: peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'User 2' : 'User 1'),
-                        ),
-                      ),
-                    );
-                  },
-                ),
                 _buildMenuItem(
                   icon: Icons.info_outline_rounded,
                   title: 'Contact info',
@@ -2204,6 +1987,50 @@ class _ChatScreenState extends State<ChatScreen> {
                     _showDisappearingTimerDialog();
                   },
                 ),
+                _buildMenuItem(
+                  icon: Icons.history_rounded,
+                  title: 'Call history',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => CallHistoryScreen(
+                          conversationId: widget.conversationId,
+                          currentUserId: widget.currentUserId,
+                          peerName: otherUserName,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+                _buildMenuItem(
+                  icon: Icons.cake_outlined,
+                  title: 'Anniversaries & Countdowns',
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => SpecialDatesScreen(
+                          socket: socket,
+                          conversationId: widget.conversationId,
+                          currentUserId: widget.currentUserId,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+                if (scheduledMessages.isNotEmpty)
+                  _buildMenuItem(
+                    icon: Icons.schedule_send_rounded,
+                    iconColor: AppTheme.primaryTeal,
+                    title: 'Scheduled messages (${scheduledMessages.length})',
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showScheduledMessagesList();
+                    },
+                  ),
                 _buildMenuItem(
                   icon: isFavourite ? Icons.favorite_rounded : Icons.favorite_border_rounded,
                   iconColor: isFavourite ? Colors.redAccent : Colors.white,
@@ -2305,60 +2132,8 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Future<void> _pickContactAvatar() async {
-    try {
-      Uint8List? pickedBytes;
-      String? pickedPath;
-
-      try {
-        final picker = ImagePicker();
-        final image = await picker.pickImage(source: ImageSource.gallery);
-        if (image != null) {
-          pickedBytes = await image.readAsBytes();
-          pickedPath = image.path;
-        }
-      } catch (_) {}
-
-      if (pickedBytes == null) {
-        final result = await FilePicker.platform.pickFiles(type: FileType.image, withData: true);
-        if (result != null && result.files.isNotEmpty && result.files.first.bytes != null) {
-          pickedBytes = result.files.first.bytes;
-          pickedPath = result.files.first.path;
-        }
-      }
-
-      if (pickedBytes != null) {
-        final otherUserId = currentUserId == 1 ? 2 : 1;
-        final base64Image = 'data:image/jpeg;base64,${base64Encode(pickedBytes)}';
-        await AuthService.saveAvatarPath(base64Image, otherUserId);
-
-        if (mounted) {
-          setState(() {
-            peerAvatarPath = base64Image;
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text("Profile picture updated successfully! ✅"),
-              backgroundColor: AppTheme.primaryTeal,
-            ),
-          );
-        }
-
-        // Upload in background to sync with backend
-        AuthService.uploadAvatar(
-          userId: otherUserId,
-          bytes: pickedBytes,
-          filename: 'avatar_$otherUserId.jpg',
-          localFilePath: pickedPath,
-        );
-      }
-    } catch (e) {
-      debugPrint("Error updating contact avatar: $e");
-    }
-  }
-
   void _showContactInfo() {
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
     final mediaCount = messages.where((m) => m['attachmentType'] == 'image').length;
     final fileCount = messages.where((m) => m['attachmentType'] == 'file').length;
 
@@ -2367,61 +2142,37 @@ class _ChatScreenState extends State<ChatScreen> {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            final isDark = Theme.of(context).brightness == Brightness.dark;
-            return Material(
-              color: isDark ? const Color(0xFF121E24) : Colors.white,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
-              clipBehavior: Clip.antiAlias,
-              child: Container(
-                height: MediaQuery.of(context).size.height * 0.75,
-                padding: const EdgeInsets.all(24),
-                child: SingleChildScrollView(
-                  child: Column(
-                    children: [
-                      Container(
-                        width: 40,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade400,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      GestureDetector(
-                        onTap: () async {
-                          await _pickContactAvatar();
-                          setModalState(() {});
-                        },
-                        child: Stack(
-                          alignment: Alignment.bottomRight,
-                          children: [
-                            CircleAvatar(
-                              radius: 48,
-                              backgroundColor: AppTheme.primaryTeal,
-                              backgroundImage: _getAvatarImageProvider(peerAvatarPath, peerAvatarUrl),
-                              child: _getAvatarImageProvider(peerAvatarPath, peerAvatarUrl) == null
-                                  ? Text(
-                                      otherUserName.isNotEmpty ? otherUserName[0].toUpperCase() : 'U',
-                                      style: const TextStyle(fontSize: 38, fontWeight: FontWeight.w900, color: Colors.white),
-                                    )
-                                  : null,
-                            ),
-                            Container(
-                              padding: const EdgeInsets.all(7),
-                              decoration: const BoxDecoration(
-                                color: AppTheme.primaryTeal,
-                                shape: BoxShape.circle,
-                                boxShadow: [
-                                  BoxShadow(color: Colors.black26, blurRadius: 4),
-                                ],
-                              ),
-                              child: const Icon(Icons.camera_alt_rounded, color: Colors.white, size: 18),
-                            ),
-                          ],
-                        ),
-                      ),
+        final isDark = Theme.of(context).brightness == Brightness.dark;
+        return Material(
+          color: isDark ? const Color(0xFF121E24) : Colors.white,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
+          clipBehavior: Clip.antiAlias,
+          child: Container(
+            height: MediaQuery.of(context).size.height * 0.75,
+            padding: const EdgeInsets.all(24),
+            child: SingleChildScrollView(
+              child: Column(
+              children: [
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade400,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 20),
+              CircleAvatar(
+                radius: 44,
+                backgroundColor: AppTheme.primaryTeal,
+                backgroundImage: _getAvatarImageProvider(peerAvatarPath, peerAvatarUrl),
+                child: _getAvatarImageProvider(peerAvatarPath, peerAvatarUrl) == null
+                    ? Text(
+                        otherUserName.isNotEmpty ? otherUserName[0].toUpperCase() : 'U',
+                        style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w900, color: Colors.white),
+                      )
+                    : null,
+              ),
               const SizedBox(height: 12),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -2490,11 +2241,9 @@ class _ChatScreenState extends State<ChatScreen> {
                     context,
                     MaterialPageRoute(
                       builder: (_) => MediaGalleryScreen(
-                        currentUserId: currentUserId,
+                        currentUserId: widget.currentUserId,
                         conversationId: widget.conversationId,
-                        peerName: peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1'),
-                        peerUserId: otherUserId,
-                        sharedSecretKey: _sharedSecretKey,
+                        peerName: peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1'),
                       ),
                     ),
                   );
@@ -2507,14 +2256,12 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ],
           ),
+            ),
         ),
-      ),
-    );
-  },
-);
-  },
-);
-}
+      );
+    },
+  );
+  }
 
   Widget _buildContactActionButton(IconData icon, String label, VoidCallback onTap) {
     return InkWell(
@@ -2646,7 +2393,7 @@ class _ChatScreenState extends State<ChatScreen> {
       socket?.emit('toggleVanishMode', {
         'conversationId': widget.conversationId,
         'isVanishMode': isVanishMode,
-        'senderId': currentUserId,
+        'senderId': widget.currentUserId,
       });
     } catch (_) {}
 
@@ -2717,6 +2464,176 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  // ==================================================
+  // NUDGE / "THINKING OF YOU"
+  // ==================================================
+
+  void _sendNudge() {
+    HapticFeedback.mediumImpact(); // built into Flutter — no package needed
+    socket?.emit('sendNudge', {'conversationId': widget.conversationId});
+    _playNudgeOverlay();
+  }
+
+  void _playNudgeOverlay() {
+    HapticFeedback.heavyImpact();
+    _nudgeOverlayTimer?.cancel();
+    if (!mounted) return;
+    setState(() => _showNudgeOverlay = true);
+    _nudgeOverlayTimer = Timer(const Duration(milliseconds: 900), () {
+      if (mounted) setState(() => _showNudgeOverlay = false);
+    });
+  }
+
+  // ==================================================
+  // SCHEDULED MESSAGES
+  // ==================================================
+
+  Future<void> _fetchScheduledMessages() async {
+    try {
+      final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
+      final res = await http.get(
+        Uri.parse('$baseUrl/messages/scheduled/${widget.conversationId}'),
+        headers: headers,
+      );
+      if (res.statusCode == 200) {
+        final data = jsonDecode(utf8.decode(res.bodyBytes));
+        final List items = data['data'] ?? [];
+        if (!mounted) return;
+        setState(() {
+          scheduledMessages = items.cast<Map<String, dynamic>>();
+        });
+      }
+    } catch (_) {}
+  }
+
+  void _cancelScheduledMessage(Map<String, dynamic> scheduled) {
+    socket?.emit('cancelScheduledMessage', {'id': scheduled['id']});
+    setState(() {
+      scheduledMessages.removeWhere((m) => m['id'].toString() == scheduled['id'].toString());
+    });
+  }
+
+  void _showScheduledMessagesList() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final isDark = Theme.of(context).brightness == Brightness.dark;
+        return Container(
+          margin: const EdgeInsets.all(16),
+          constraints: const BoxConstraints(maxHeight: 420),
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF1F2C33) : Colors.white,
+            borderRadius: BorderRadius.circular(24),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text('Scheduled Messages', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+              ),
+              Flexible(
+                child: scheduledMessages.isEmpty
+                    ? const Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Text('No messages scheduled', style: TextStyle(color: Colors.grey)),
+                      )
+                    : ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: scheduledMessages.length,
+                        itemBuilder: (context, i) {
+                          final s = scheduledMessages[i];
+                          DateTime? sendAt;
+                          try {
+                            sendAt = DateTime.parse(s['send_at'].toString()).toLocal();
+                          } catch (_) {}
+                          return ListTile(
+                            leading: const Icon(Icons.timer_outlined, color: AppTheme.primaryTeal),
+                            title: Text(s['message']?.toString() ?? '', maxLines: 1, overflow: TextOverflow.ellipsis),
+                            subtitle: Text(
+                              sendAt != null ? 'Sends ${sendAt.day}/${sendAt.month}/${sendAt.year} at ${TimeOfDay.fromDateTime(sendAt).format(context)}' : '',
+                              style: const TextStyle(fontSize: 11.5),
+                            ),
+                            trailing: IconButton(
+                              icon: const Icon(Icons.close_rounded, color: Colors.redAccent),
+                              onPressed: () => _cancelScheduledMessage(s),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showScheduleMessageDialog() async {
+    final text = messageController.text.trim();
+    final textController = TextEditingController(text: text);
+
+    final now = DateTime.now();
+    final pickedDate = await showDatePicker(
+      context: context,
+      initialDate: now.add(const Duration(minutes: 5)),
+      firstDate: now,
+      lastDate: now.add(const Duration(days: 365)),
+    );
+    if (pickedDate == null || !mounted) return;
+
+    final pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(now.add(const Duration(minutes: 5))),
+    );
+    if (pickedTime == null || !mounted) return;
+
+    final sendAt = DateTime(pickedDate.year, pickedDate.month, pickedDate.day, pickedTime.hour, pickedTime.minute);
+    if (sendAt.isBefore(DateTime.now())) {
+      _showErrorSnackBar('Please pick a time in the future');
+      return;
+    }
+
+    if (!mounted) return;
+    final confirmedText = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Schedule Message', style: TextStyle(fontWeight: FontWeight.w900)),
+        content: TextField(
+          controller: textController,
+          autofocus: text.isEmpty,
+          maxLines: 4,
+          decoration: InputDecoration(
+            hintText: 'Type your message...',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: AppTheme.primaryTeal, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, textController.text.trim()),
+            child: Text('Schedule for ${pickedTime.format(context)}'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmedText == null || confirmedText.isEmpty) return;
+
+    socket?.emit('scheduleMessage', {
+      'conversationId': widget.conversationId,
+      'message': confirmedText,
+      'sendAtIso': sendAt.toIso8601String(),
+    });
+
+    messageController.clear();
+  }
+
   void _showDisappearingTimerDialog() {
     final options = <String, int?>{
       'Off': null,
@@ -2782,7 +2699,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       isFavourite = !isFavourite;
     });
-    final otherUserName = currentUserId == 1 ? 'Leslie' : 'User 1';
+    final otherUserName = widget.currentUserId == 1 ? 'Leslie' : 'User 1';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(isFavourite ? 'Added $otherUserName to Favourites â¤ï¸' : 'Removed $otherUserName from Favourites'),
@@ -2818,7 +2735,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _exportChatTranscript() {
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
     final StringBuffer transcript = StringBuffer();
     transcript.writeln("=== Clock History Export ===");
     transcript.writeln("Participant: $otherUserName");
@@ -2868,7 +2785,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _showSafetyNumberDialog() async {
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -2882,7 +2799,7 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         content: FutureBuilder<http.Response>(
           future: () async {
-            final headers = await AuthService.getAuthHeadersForUser(currentUserId);
+            final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
             return http.get(Uri.parse('$baseUrl/auth/safety-number/${widget.conversationId}'), headers: headers);
           }(),
           builder: (context, snapshot) {
@@ -2939,7 +2856,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _sendCallLink() {
     final callRoomId = 'room_${DateTime.now().millisecondsSinceEpoch}';
-    final callLinkMsg = "🔗 Join my Clock Call: https://duochat.call/$callRoomId";
+    final callLinkMsg = "ðŸ”— Join my DuoCall: https://duochat.call/$callRoomId";
 
     messageController.text = callLinkMsg;
     sendMessage();
@@ -2963,193 +2880,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (pickedTime == null || !mounted) return;
 
-    final scheduleText = "📅 Scheduled Clock Call for ${pickedDate.day}/${pickedDate.month}/${pickedDate.year} at ${pickedTime.format(context)}";
+    final scheduleText = "\u{1F4C5} Scheduled Duo Call for ${pickedDate.day}/${pickedDate.month}/${pickedDate.year} at ${pickedTime.format(context)}";
     messageController.text = scheduleText;
     sendMessage();
   }
 
-  Widget _buildCallLinkCard({
-    required String messageText,
-    required bool isMe,
-    required bool isDark,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      margin: const EdgeInsets.only(bottom: 2),
-      decoration: BoxDecoration(
-        color: isMe
-            ? Colors.white.withValues(alpha: 0.18)
-            : (isDark ? const Color(0xFF1F2C33) : Colors.white),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: isMe ? Colors.white30 : AppTheme.primaryTeal.withValues(alpha: 0.35),
-          width: 1,
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: const BoxDecoration(
-                  color: AppTheme.primaryTeal,
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(
-                  Icons.video_call_rounded,
-                  color: Colors.white,
-                  size: 22,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Clock Video Call',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w900,
-                        fontSize: 14.5,
-                        color: isMe ? Colors.white : (isDark ? Colors.white : Colors.black87),
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Private Encrypted Call Link',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w600,
-                        color: isMe ? Colors.white70 : (isDark ? Colors.white60 : Colors.black54),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: () => _openCallScreen(isVideoCall: true, isCaller: true),
-              icon: const Icon(Icons.call_rounded, size: 18),
-              label: const Text('Join Call Now', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: isMe ? Colors.white : AppTheme.primaryTeal,
-                foregroundColor: isMe ? AppTheme.primaryTeal : Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                elevation: 0,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildScheduledCallCard({
-    required String messageText,
-    required bool isMe,
-    required bool isDark,
-  }) {
-    final String displayTime = messageText
-        .replaceAll('📅 Scheduled Duo Call for ', '')
-        .replaceAll('📅 Scheduled Clock Call for ', '')
-        .replaceAll('📅 Scheduled Call for ', '')
-        .replaceAll('\u{1F4C5} Scheduled Duo Call for ', '')
-        .replaceAll('\u{1F4C5} Scheduled Clock Call for ', '')
-        .trim();
-
-    return Container(
-      padding: const EdgeInsets.all(12),
-      margin: const EdgeInsets.only(bottom: 2),
-      decoration: BoxDecoration(
-        color: isMe
-            ? Colors.white.withValues(alpha: 0.18)
-            : (isDark ? const Color(0xFF1F2C33) : Colors.white),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: isMe ? Colors.white30 : AppTheme.primaryTeal.withValues(alpha: 0.35),
-          width: 1,
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: Colors.amber.shade700,
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(
-                  Icons.event_available_rounded,
-                  color: Colors.white,
-                  size: 22,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Scheduled Clock Call',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w900,
-                        fontSize: 14.5,
-                        color: isMe ? Colors.white : (isDark ? Colors.white : Colors.black87),
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      displayTime.isNotEmpty ? displayTime : messageText,
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        color: isMe ? Colors.white70 : (isDark ? Colors.white70 : Colors.black87),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: () => _openCallScreen(isVideoCall: true, isCaller: true),
-              icon: const Icon(Icons.call_rounded, size: 18),
-              label: const Text('Start / Join Scheduled Call', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: isMe ? Colors.white : AppTheme.primaryTeal,
-                foregroundColor: isMe ? AppTheme.primaryTeal : Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                elevation: 0,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   void _startNewGroupCall() {
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
 
     showDialog(
       context: context,
@@ -3245,7 +2982,7 @@ class _ChatScreenState extends State<ChatScreen> {
         Uri.parse('$baseUrl/auth/fcm-token'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
-          'userId': currentUserId,
+          'userId': widget.currentUserId,
           'fcmToken': token,
         }),
       );
@@ -3263,7 +3000,7 @@ class _ChatScreenState extends State<ChatScreen> {
           context,
           MaterialPageRoute(
             builder: (_) => ChatScreen(
-              currentUserId: currentUserId,
+              currentUserId: widget.currentUserId,
               conversationId: targetConvId,
             ),
           ),
@@ -3274,9 +3011,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> fetchUnreadCount() async {
     try {
-      final headers = await AuthService.getAuthHeadersForUser(currentUserId);
+      final headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
       final response = await http.get(
-        Uri.parse('$baseUrl/messages/unread-count/${widget.conversationId}/$currentUserId'),
+        Uri.parse('$baseUrl/messages/unread-count/${widget.conversationId}/${widget.currentUserId}'),
         headers: headers,
       );
 
@@ -3290,7 +3027,7 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       }
     } catch (e) {
-      // Silent – server may be offline
+      // Silent Î“Ã‡Ã¶ server may be offline
     }
   }
 
@@ -3306,7 +3043,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     try {
-      var headers = await AuthService.getAuthHeadersForUser(currentUserId);
+      var headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
       var response = await http.get(
         Uri.parse('$baseUrl/messages/${widget.conversationId}'),
         headers: headers,
@@ -3314,10 +3051,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
       // Auto-retry if token is invalid or expired
       if (response.statusCode == 401 || response.statusCode == 403) {
-        final email = currentUserId == 1 ? 'user1@example.com' : 'user2@example.com';
+        final email = widget.currentUserId == 1 ? 'user1@example.com' : 'user2@example.com';
         final loginRes = await AuthService.login(email, 'password123');
         if (loginRes['success'] == true && loginRes['token'] != null) {
-          headers = await AuthService.getAuthHeadersForUser(currentUserId);
+          headers = await AuthService.getAuthHeadersForUser(widget.currentUserId);
           response = await http.get(
             Uri.parse('$baseUrl/messages/${widget.conversationId}'),
             headers: headers,
@@ -3332,93 +3069,94 @@ class _ChatScreenState extends State<ChatScreen> {
           final List fetchedData = data['data'];
           debugPrint("[CHAT] Messages loaded from persistence: ${fetchedData.length}");
 
-          final List<Map<String, dynamic>> parsedMessages = await Future.wait(
-            fetchedData.map((item) async {
-              final rawTime = item['created_at'] != null ? item['created_at'].toString() : '';
-              final bool isRead = item['is_read'] == true || item['isRead'] == true;
-              final bool isDelivered = isRead || item['is_delivered'] == true || item['isDelivered'] == true;
-              final bool isEdited = item['is_edited'] == true || item['isEdited'] == true;
-              final bool isDeleted = item['is_deleted'] == true || item['isDeleted'] == true;
-              final nonce = item['nonce'];
-              final isEncrypted = item['is_encrypted'] == true || item['isEncrypted'] == true;
+          final List<Map<String, dynamic>> parsedMessages = fetchedData.map<Map<String, dynamic>>((item) {
+            final rawTime = item['created_at'] != null ? item['created_at'].toString() : '';
+            final bool isRead = item['is_read'] == true || item['isRead'] == true;
+            final bool isDelivered = isRead || item['is_delivered'] == true || item['isDelivered'] == true;
+            final bool isEdited = item['is_edited'] == true || item['isEdited'] == true;
+            final bool isDeleted = item['is_deleted'] == true || item['isDeleted'] == true;
+            final nonce = item['nonce'];
+            final isEncrypted = item['is_encrypted'] == true || item['isEncrypted'] == true;
 
-              final replyToMessageId = item['reply_to_message_id'] ?? item['replyToMessageId'];
-              final replySenderId = item['reply_sender_id'] ?? item['replySenderId'];
-              final replySenderName = item['reply_sender_name'] ?? item['replySenderName'];
-              final replyMessage = item['reply_message'] ?? item['replyMessage'];
-              final replyAttachmentType = item['reply_attachment_type'] ?? item['replyAttachmentType'];
-              final replyAttachmentName = item['reply_attachment_name'] ?? item['replyAttachmentName'];
-              final bool replyIsDeleted = item['reply_is_deleted'] == true;
+            final replyToMessageId = item['reply_to_message_id'] ?? item['replyToMessageId'];
+            final replySenderId = item['reply_sender_id'] ?? item['replySenderId'];
+            final replySenderName = item['reply_sender_name'] ?? item['replySenderName'];
+            final replyMessage = item['reply_message'] ?? item['replyMessage'];
+            final replyAttachmentType = item['reply_attachment_type'] ?? item['replyAttachmentType'];
+            final replyAttachmentName = item['reply_attachment_name'] ?? item['replyAttachmentName'];
+            final bool replyIsDeleted = item['reply_is_deleted'] == true;
 
-              final reactions = item['reactions'] is Map
-                  ? Map<String, dynamic>.from(item['reactions'])
-                  : <String, dynamic>{};
+            final reactions = item['reactions'] is Map
+                ? Map<String, dynamic>.from(item['reactions'])
+                : <String, dynamic>{};
 
-              final bool isPinnedItem = item['is_pinned'] == true;
-              final bool liveStillActive = item['live_location_active'] == true;
+            final bool isPinnedItem = item['is_pinned'] == true;
+            final bool liveStillActive = item['live_location_active'] == true;
 
-              String rawText = (item['message'] ?? '').toString();
-              if ((item['attachment_type'] ?? item['attachmentType']) == 'location' && !liveStillActive) {
-                try {
-                  final locJson = jsonDecode(rawText);
-                  if (locJson is Map && locJson['isLive'] == true) {
-                    locJson['isLive'] = false;
-                    rawText = jsonEncode(locJson);
-                  }
-                } catch (_) {}
-              }
+            String rawText = (item['message'] ?? '').toString();
+            // Live-location messages: the server keeps the last JSON payload with
+            // isLive:true even after sharing ends, so trust the DB flag instead.
+            if ((item['attachment_type'] ?? item['attachmentType']) == 'location' && !liveStillActive) {
+              try {
+                final locJson = jsonDecode(rawText);
+                if (locJson is Map && locJson['isLive'] == true) {
+                  locJson['isLive'] = false;
+                  rawText = jsonEncode(locJson);
+                }
+              } catch (_) {}
+            }
 
-              final msgId = item['id'];
-              final decryptedText = await _decryptTextAsync(rawText, nonce, isEncrypted, isDeleted);
+            final msgId = item['id'];
+            final decryptedText = isDeleted
+                ? 'This message was deleted'
+                : _decryptMessageIfNeeded(msgId, rawText, nonce, isEncrypted);
 
-              return {
-                'id': msgId,
-                'sender_id': item['sender_id'] ?? item['senderId'],
-                'senderId': item['sender_id'] ?? item['senderId'],
-                'message': decryptedText,
-                'rawMessage': rawText,
-                'nonce': nonce,
-                'isEncrypted': isEncrypted,
-                'is_encrypted': isEncrypted,
-                'attachmentUrl': item['attachment_url'] ?? item['attachmentUrl'],
-                'attachmentType': item['attachment_type'] ?? item['attachmentType'],
-                'attachmentName': item['attachment_name'] ?? item['attachmentName'],
-                'attachmentSize': item['attachment_size'] ?? item['attachmentSize'],
-                'replyToMessageId': replyToMessageId,
-                'reply_to_message_id': replyToMessageId,
-                'replySenderId': replySenderId,
-                'reply_sender_id': replySenderId,
-                'replySenderName': replySenderName,
-                'reply_sender_name': replySenderName,
-                'replyMessage': replyMessage,
-                'reply_message': replyMessage,
-                'replyAttachmentType': replyAttachmentType,
-                'reply_attachment_type': replyAttachmentType,
-                'replyAttachmentName': replyAttachmentName,
-                'reply_attachment_name': replyAttachmentName,
-                'replyIsDeleted': replyIsDeleted,
-                'reply_is_deleted': replyIsDeleted,
-                'isMe': _isMessageFromMe(item),
-                'isDelivered': isDelivered,
-                'is_delivered': isDelivered,
-                'isRead': isRead,
-                'is_read': isRead,
-                'isEdited': isEdited,
-                'is_edited': isEdited,
-                'isDeleted': isDeleted,
-                'is_deleted': isDeleted,
-                'reactions': reactions,
-                'isPinned': isPinnedItem,
-                'time': _formatTime(rawTime),
-              };
-            }),
-          );
+            return <String, dynamic>{
+              'id': msgId,
+              'message': decryptedText,
+              'nonce': nonce,
+              'isEncrypted': isEncrypted,
+              'is_encrypted': isEncrypted,
+              'attachmentUrl': item['attachment_url'] ?? item['attachmentUrl'],
+              'attachmentType': item['attachment_type'] ?? item['attachmentType'],
+              'attachmentName': item['attachment_name'] ?? item['attachmentName'],
+              'attachmentSize': item['attachment_size'] ?? item['attachmentSize'],
+              'replyToMessageId': replyToMessageId,
+              'reply_to_message_id': replyToMessageId,
+              'replySenderId': replySenderId,
+              'reply_sender_id': replySenderId,
+              'replySenderName': replySenderName,
+              'reply_sender_name': replySenderName,
+              'replyMessage': replyMessage,
+              'reply_message': replyMessage,
+              'replyAttachmentType': replyAttachmentType,
+              'reply_attachment_type': replyAttachmentType,
+              'replyAttachmentName': replyAttachmentName,
+              'reply_attachment_name': replyAttachmentName,
+              'replyIsDeleted': replyIsDeleted,
+              'reply_is_deleted': replyIsDeleted,
+              // Strict message ownership based on senderId
+              'isMe': (item['sender_id'] ?? item['senderId']) != null &&
+                     int.parse((item['sender_id'] ?? item['senderId']).toString()) == widget.currentUserId,
+              'isDelivered': isDelivered,
+              'is_delivered': isDelivered,
+              'isRead': isRead,
+              'is_read': isRead,
+              'isEdited': isEdited,
+              'is_edited': isEdited,
+              'isDeleted': isDeleted,
+              'is_deleted': isDeleted,
+              'reactions': reactions,
+              'isPinned': isPinnedItem,
+              'time': _formatTime(rawTime),
+            };
+          }).toList();
 
           debugPrint("=== HISTORY MESSAGE CHECK ===");
           if (parsedMessages.isNotEmpty) {
             final testMsg = parsedMessages.last;
             debugPrint("Message ID: ${testMsg['id']}");
-            debugPrint("currentUserId: $currentUserId");
+            debugPrint("currentUserId: ${widget.currentUserId}");
             debugPrint("sender_id (raw): ${fetchedData.last['sender_id']}");
             debugPrint("senderId (raw): ${fetchedData.last['senderId']}");
             debugPrint("isMe: ${testMsg['isMe']}");
@@ -3432,11 +3170,11 @@ class _ChatScreenState extends State<ChatScreen> {
             messages.addAll(parsedMessages);
             isLoading = false;
 
-            // Restore the pinned-message banner from the decrypted parsedMessages!
+            // Restore the pinned-message banner after an app restart / reload
             pinnedMessage = null;
-            for (final m in parsedMessages) {
-              if (m['isPinned'] == true && m['isDeleted'] != true) {
-                pinnedMessage = Map<String, dynamic>.from(m);
+            for (final raw in fetchedData) {
+              if (raw['is_pinned'] == true && raw['is_deleted'] != true) {
+                pinnedMessage = Map<String, dynamic>.from(raw as Map);
                 break;
               }
             }
@@ -3770,32 +3508,13 @@ class _ChatScreenState extends State<ChatScreen> {
       );
 
       final isLive = durationSeconds != null && durationSeconds > 0;
-      final payload = jsonEncode({'lat': position.latitude, 'lng': position.longitude, 'isLive': isLive});
-      final tempMsgId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
 
-      final tempLocationMsg = {
-        'id': tempMsgId,
-        'senderId': currentUserId,
-        'sender_id': currentUserId,
-        'message': payload,
-        'attachmentType': 'location',
-        'attachment_type': 'location',
-        'isMe': true,
-        'isDelivered': true,
-        'isRead': false,
-        'time': _formatTime(DateTime.now().toIso8601String()),
-      };
-
-      if (mounted) {
+      if (isLive) {
         setState(() {
-          if (isLive) {
-            _isSharingLiveLocation = true;
-            _activeLiveLocationMessageId = null; // learned once the server echoes newMessage
-            _liveLocationEndTime = DateTime.now().add(Duration(seconds: durationSeconds));
-          }
-          messages.add(tempLocationMsg);
+          _isSharingLiveLocation = true;
+          _activeLiveLocationMessageId = null; // learned once the server echoes newMessage
+          _liveLocationEndTime = DateTime.now().add(Duration(seconds: durationSeconds));
         });
-        _scrollToBottom();
       }
 
       socket?.emit('shareLiveLocation', {
@@ -3987,7 +3706,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final tempMessageMap = {
       'id': tempMsgId,
-      'senderId': currentUserId,
+      'senderId': widget.currentUserId,
       'message': caption,
       'attachmentUrl': filePath ?? fileName,
       'isLocalFile': true,
@@ -4011,7 +3730,7 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final uri = Uri.parse('$baseUrl/messages/upload');
       final request = http.MultipartRequest('POST', uri);
-      final token = await AuthService.getTokenForUser(currentUserId);
+      final token = await AuthService.getTokenForUser(widget.currentUserId);
       if (token != null && token.isNotEmpty) {
         request.headers['Authorization'] = 'Bearer $token';
       }
@@ -4022,40 +3741,10 @@ class _ChatScreenState extends State<ChatScreen> {
       }
 
       request.fields['conversationId'] = widget.conversationId.toString();
-      request.fields['senderId'] = currentUserId.toString();
+      request.fields['senderId'] = widget.currentUserId.toString();
+      request.fields['message'] = caption;
       request.fields['attachmentType'] = attachmentType;
-
-      // ── E2EE: encrypt caption (text) ──────────────────────────────────────
-      String sendText = caption;
-      String? sendNonce;
-      bool isEnc = false;
-      if (caption.isNotEmpty && _isE2eeReady && _sharedSecretKey != null) {
-        final encResult = await EncryptionService().encryptText(caption, _sharedSecretKey!);
-        sendText = encResult['ciphertext']!;
-        sendNonce = encResult['nonce'];
-        isEnc = true;
-      }
-
-      // ── E2EE: encrypt media binary bytes ──────────────────────────────────
-      String uploadFileName = fileName;
-      if (uploadBytes != null && _isE2eeReady && _sharedSecretKey != null) {
-        final encBytesResult = await EncryptionService().encryptBytes(uploadBytes, _sharedSecretKey!);
-        uploadBytes = encBytesResult['bytes'] as Uint8List;
-        // Use media nonce (separate from caption nonce) — store in field
-        final mediaNonce = encBytesResult['nonce'] as String;
-        // Override sendNonce with media nonce (caption already encrypted above)
-        // We store both by sending mediaNonce as the primary nonce for this message
-        sendNonce = mediaNonce;
-        isEnc = true;
-        // Rename to .bin so multer accepts the encrypted blob
-        uploadFileName = '${uploadFileName.replaceAll(RegExp(r'\.[^.]+$'), '')}.bin';
-      }
-
-      request.fields['message'] = sendText;
-      request.fields['isEncrypted'] = isEnc ? 'true' : 'false';
-      if (sendNonce != null) {
-        request.fields['nonce'] = sendNonce;
-      }
+      request.fields['isEncrypted'] = 'false';
       if (replyId != null) {
         request.fields['replyToMessageId'] = replyId.toString();
       }
@@ -4065,7 +3754,7 @@ class _ChatScreenState extends State<ChatScreen> {
           http.MultipartFile.fromBytes(
             'file',
             uploadBytes,
-            filename: uploadFileName,
+            filename: fileName,
           ),
         );
       } else if (filePath != null) {
@@ -4073,7 +3762,7 @@ class _ChatScreenState extends State<ChatScreen> {
           await http.MultipartFile.fromPath(
             'file',
             filePath,
-            filename: uploadFileName,
+            filename: fileName,
           ),
         );
       }
@@ -4085,8 +3774,6 @@ class _ChatScreenState extends State<ChatScreen> {
         final resData = jsonDecode(utf8.decode(response.bodyBytes));
         if (resData['success'] == true && resData['data'] != null) {
           final msgData = resData['data'];
-          final bool savedIsEncrypted = msgData['is_encrypted'] == true;
-          final String? savedNonce = msgData['nonce']?.toString();
 
           if (mounted) {
             setState(() {
@@ -4094,19 +3781,16 @@ class _ChatScreenState extends State<ChatScreen> {
               if (idx != -1) {
                 messages[idx] = {
                   'id': msgData['id'],
-                  'message': caption,        // already-decrypted caption for own display
-                  'rawMessage': sendText,    // ciphertext kept for correctness
-                  'nonce': savedNonce,
-                  'isEncrypted': savedIsEncrypted,
-                  'is_encrypted': savedIsEncrypted,
+                  'message': caption,
+                  'nonce': msgData['nonce'],
+                  'isEncrypted': false,
+                  'is_encrypted': false,
                   'attachmentUrl': msgData['attachment_url'],
-                  'attachmentType': attachmentType,  // keep original type (image/audio/file)
-                  'attachmentName': fileName,         // keep original display name
+                  'attachmentType': msgData['attachment_type'],
+                  'attachmentName': msgData['attachment_name'],
                   'attachmentSize': msgData['attachment_size'],
                   'replyToMessageId': replyId,
                   'isMe': true,
-                  'isLocalFile': (filePath != null && !kIsWeb),
-                  'localFilePath': filePath,         // sender can use local plaintext file
                   'isUploading': false,
                   'isDelivered': msgData['is_delivered'] == true,
                   'is_delivered': msgData['is_delivered'] == true,
@@ -4120,17 +3804,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
           socket?.emit('sendMessage', {
             'conversationId': widget.conversationId,
-            'senderId': currentUserId,
-            'message': sendText,                  // ciphertext (or plaintext if no key)
+            'senderId': widget.currentUserId,
+            'message': msgData['message'] ?? caption,
             'attachmentUrl': msgData['attachment_url'],
-            'attachmentType': attachmentType,     // original type so recipient knows
-            'attachmentName': fileName,            // original display name
+            'attachmentType': msgData['attachment_type'],
+            'attachmentName': msgData['attachment_name'],
             'attachmentSize': msgData['attachment_size'],
             'replyToMessageId': replyId,
             'tempMsgId': tempMsgId,
             'messageId': msgData['id'],
-            'nonce': savedNonce,
-            'isEncrypted': savedIsEncrypted,
+            'nonce': msgData['nonce'],
+            'isEncrypted': false,
             'isAlreadySaved': true,
           });
         }
@@ -4141,6 +3825,46 @@ class _ChatScreenState extends State<ChatScreen> {
       debugPrint("Error uploading attachment: $e");
       _showErrorSnackBar("Failed to send attachment");
     }
+  }
+
+  void _startHeartbeatShare() {
+    if (socket == null) return;
+    HeartbeatService.startSending(
+      socket: socket!,
+      conversationId: widget.conversationId,
+      senderId: widget.currentUserId,
+    );
+    setState(() => _showHeartbeatOverlay = true);
+  }
+
+  void _openFingerTrail() {
+    FingerTrailService.openOverlay(widget.currentUserId);
+    setState(() => _showFingerTrailOverlay = true);
+  }
+
+  void _sendHug() {
+    HugKissService.sendHug();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Warm Hug sent! 🫂'), duration: Duration(seconds: 2)),
+    );
+  }
+
+  void _openKissSync() {
+    setState(() => _showKissOverlay = true);
+  }
+
+  void _openSharedSky() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SharedSkyScreen(
+          socket: socket,
+          conversationId: widget.conversationId,
+          currentUserId: widget.currentUserId,
+          partnerName: peerDisplayName.isNotEmpty ? peerDisplayName : 'Partner',
+        ),
+      ),
+    );
   }
 
   void _showAttachmentGridSheet() {
@@ -4223,48 +3947,48 @@ class _ChatScreenState extends State<ChatScreen> {
                       },
                     ),
                     _buildAttachmentGridItem(
-                      icon: Icons.auto_awesome_rounded,
-                      label: "Our Sky",
-                      color: const Color(0xFF6366F1),
+                      icon: Icons.favorite_rounded,
+                      label: "Heartbeat",
+                      color: const Color(0xFFE91E63),
                       onTap: () {
                         Navigator.pop(ctx);
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => SharedSkyScreen(
-                              conversationId: widget.conversationId,
-                              currentUserId: currentUserId,
-                              partnerName: peerDisplayName.isNotEmpty ? peerDisplayName : 'Partner',
-                              socket: socket,
-                            ),
-                          ),
-                        );
+                        _startHeartbeatShare();
+                      },
+                    ),
+                    _buildAttachmentGridItem(
+                      icon: Icons.touch_app_rounded,
+                      label: "Touch",
+                      color: const Color(0xFFFF9800),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _openFingerTrail();
                       },
                     ),
                     _buildAttachmentGridItem(
                       icon: Icons.volunteer_activism_rounded,
                       label: "Send Hug",
-                      color: const Color(0xFFF59E0B),
+                      color: const Color(0xFF9C27B0),
                       onTap: () {
                         Navigator.pop(ctx);
-                        HugKissService.sendHug();
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: const Text('Warm hug sent! 🤗💖'),
-                            backgroundColor: const Color(0xFFD97706),
-                            behavior: SnackBarBehavior.floating,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                        );
+                        _sendHug();
                       },
                     ),
                     _buildAttachmentGridItem(
-                      icon: Icons.favorite_rounded,
+                      icon: Icons.favorite_border_rounded,
                       label: "Kiss Sync",
-                      color: const Color(0xFFE11D48),
+                      color: const Color(0xFFE91E63),
                       onTap: () {
                         Navigator.pop(ctx);
-                        setState(() => _showKissSyncModal = true);
+                        _openKissSync();
+                      },
+                    ),
+                    _buildAttachmentGridItem(
+                      icon: Icons.cloud_queue_rounded,
+                      label: "Shared Sky",
+                      color: const Color(0xFF00BCD4),
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _openSharedSky();
                       },
                     ),
                   ],
@@ -4385,7 +4109,7 @@ class _ChatScreenState extends State<ChatScreen> {
               socket?.emit('deleteMessage', {
                 'conversationId': widget.conversationId,
                 'messageId': messageMap['id'],
-                'senderId': currentUserId,
+                'senderId': widget.currentUserId,
               });
             },
             child: const Text("Delete"),
@@ -4399,39 +4123,15 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = messageController.text.trim();
     if (text.isEmpty) return;
 
-    if (!_isE2eeReady || _sharedSecretKey == null) {
-      await _initE2EE();
-    }
-
     _stopTypingEmit();
-
-    final bool canEncrypt = _isE2eeReady && _sharedSecretKey != null;
-    final Map<String, String> encResult = canEncrypt
-        ? await EncryptionService().encryptText(text, _sharedSecretKey!)
-        : {'ciphertext': text, 'nonce': ''};
 
     if (editingMessageId != null) {
       socket?.emit('editMessage', {
         'conversationId': widget.conversationId,
         'messageId': editingMessageId,
-        'senderId': currentUserId,
-        'newMessage': encResult['ciphertext'],
-        'nonce': encResult['nonce'],
-        'isEncrypted': canEncrypt,
+        'senderId': widget.currentUserId,
+        'newMessage': text,
       });
-
-      final idx = messages.indexWhere((m) => m['id'] == editingMessageId);
-      if (idx != -1) {
-        setState(() {
-          messages[idx]['message'] = text;
-          messages[idx]['rawMessage'] = encResult['ciphertext'];
-          messages[idx]['nonce'] = encResult['nonce'];
-          messages[idx]['isEncrypted'] = canEncrypt;
-          messages[idx]['isEdited'] = true;
-          messages[idx]['is_edited'] = true;
-        });
-      }
-
       setState(() {
         editingMessageId = null;
       });
@@ -4445,12 +4145,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
       final optimisticMsg = {
         'id': tempMsgId,
-        'senderId': currentUserId,
+        'senderId': widget.currentUserId,
         'message': text,
-        'rawMessage': encResult['ciphertext'],
-        'nonce': encResult['nonce'],
-        'isEncrypted': canEncrypt,
-        'is_encrypted': canEncrypt,
         'attachmentUrl': null,
         'attachmentType': null,
         'attachmentName': null,
@@ -4477,13 +4173,13 @@ class _ChatScreenState extends State<ChatScreen> {
       });
       _scrollToBottom();
 
-      debugPrint('[CHAT SOCKET] SEND MESSAGE (canEncrypt=$canEncrypt)');
+      debugPrint('[CHAT SOCKET] SEND MESSAGE: $text');
       socket?.emit('sendMessage', {
         'conversationId': widget.conversationId,
-        'senderId': currentUserId,
-        'message': encResult['ciphertext'],
-        'nonce': encResult['nonce'],
-        'isEncrypted': canEncrypt,
+        'senderId': widget.currentUserId,
+        'message': text,
+        'nonce': null,
+        'isEncrypted': false,
         'replyToMessageId': replyId,
         'tempMsgId': tempMsgId,
       });
@@ -4497,7 +4193,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (currentUserId == 1 ? 'Leslie' : 'User 1');
+    final otherUserName = peerDisplayName.isNotEmpty ? peerDisplayName : (widget.currentUserId == 1 ? 'Leslie' : 'User 1');
 
     final Color scaffoldBg = isVanishMode
         ? const Color(0xFF0D0B14)
@@ -4600,12 +4296,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ClipPath(
                 clipper: WaveHeaderClipper(),
                 child: Container(
-                  padding: EdgeInsets.only(
-                    top: MediaQuery.of(context).padding.top + 6,
-                    left: 4,
-                    right: 4,
-                    bottom: 10,
-                  ),
+                  padding: const EdgeInsets.only(top: 45, left: 16, right: 16, bottom: 6),
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
                       colors: isVanishMode
@@ -4616,7 +4307,6 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ),
                   child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       // Back button
                       IconButton(
@@ -4626,7 +4316,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         onPressed: () => Navigator.pop(context),
                       ),
                       const SizedBox(width: 2),
-                      // Peer info (Avatar + Name + Status)
+                      // Peer info (takes all remaining space)
                       Expanded(
                         child: GestureDetector(
                           onTap: _showContactInfo,
@@ -4634,10 +4324,9 @@ class _ChatScreenState extends State<ChatScreen> {
                           child: Row(
                             children: [
                               Stack(
-                                clipBehavior: Clip.none,
                                 children: [
                                   CircleAvatar(
-                                    radius: 18,
+                                    radius: 17,
                                     backgroundColor: Colors.white24,
                                     backgroundImage: _getAvatarImageProvider(peerAvatarPath, peerAvatarUrl),
                                     child: _getAvatarImageProvider(peerAvatarPath, peerAvatarUrl) == null
@@ -4656,8 +4345,8 @@ class _ChatScreenState extends State<ChatScreen> {
                                       right: 0,
                                       bottom: 0,
                                       child: Container(
-                                        width: 10,
-                                        height: 10,
+                                        width: 9,
+                                        height: 9,
                                         decoration: BoxDecoration(
                                           color: const Color(0xFF00E676),
                                           shape: BoxShape.circle,
@@ -4667,10 +4356,10 @@ class _ChatScreenState extends State<ChatScreen> {
                                     ),
                                 ],
                               ),
-                              const SizedBox(width: 8),
+                              const SizedBox(width: 7),
                               Expanded(
                                 child: Column(
-                                  mainAxisSize: MainAxisSize.min,
+                                  mainAxisAlignment: MainAxisAlignment.center,
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Row(
@@ -4683,17 +4372,16 @@ class _ChatScreenState extends State<ChatScreen> {
                                             overflow: TextOverflow.ellipsis,
                                             style: const TextStyle(
                                               fontSize: 15,
-                                              fontWeight: FontWeight.w800,
+                                              fontWeight: FontWeight.w900,
                                               color: Colors.white,
-                                              letterSpacing: 0.2,
+                                              letterSpacing: 0.1,
                                             ),
                                           ),
                                         ),
-                                        const SizedBox(width: 4),
+                                        const SizedBox(width: 3),
                                         const Icon(Icons.verified_rounded, color: Colors.white70, size: 14),
                                       ],
                                     ),
-                                    const SizedBox(height: 1),
                                     Text(
                                       isOtherUserTyping
                                           ? typingText
@@ -4705,7 +4393,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                         color: isOtherUserTyping
                                             ? const Color(0xFFFFE082)
                                             : (isOtherUserOnline ? const Color(0xFFA7FFEB) : Colors.white70),
-                                        fontWeight: FontWeight.w600,
+                                        fontWeight: FontWeight.w700,
                                       ),
                                     ),
                                   ],
@@ -4715,30 +4403,43 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                         ),
                       ),
-                      // Audio Call button
-                      IconButton(
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                        icon: const Icon(Icons.call_rounded, color: Colors.white, size: 20),
-                        tooltip: 'Audio Call',
-                        onPressed: () => _openCallScreen(isVideoCall: false, isCaller: true),
-                      ),
-                      // Video Call button
-                      IconButton(
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                        icon: const Icon(Icons.videocam_rounded, color: Colors.white, size: 21),
-                        tooltip: 'Video Call',
-                        onPressed: () => _openCallScreen(isVideoCall: true, isCaller: true),
-                      ),
-                      // 3-dots Menu button
-                      IconButton(
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(minWidth: 32, minHeight: 36),
-                        icon: const Icon(Icons.more_vert_rounded, color: Colors.white, size: 22),
-                        tooltip: 'Menu',
-                        onPressed: _showThreeDotsMenu,
-                      ),
+                       IconButton(
+                         padding: EdgeInsets.zero,
+                         constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                         icon: const Icon(Icons.call_rounded, color: Colors.white, size: 19),
+                         tooltip: 'Audio Call',
+                         onPressed: () => _openCallScreen(isVideoCall: false, isCaller: true),
+                       ),
+                       IconButton(
+                         padding: EdgeInsets.zero,
+                         constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                         icon: const Icon(Icons.videocam_rounded, color: Colors.white, size: 20),
+                         tooltip: 'Video Call',
+                         onPressed: () => _openCallScreen(isVideoCall: true, isCaller: true),
+                       ),
+                       IconButton(
+                         padding: EdgeInsets.zero,
+                         constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                         icon: const Icon(Icons.menu_book_rounded, color: Colors.white, size: 19),
+                         tooltip: 'Our Diary',
+                         onPressed: () => Navigator.push(
+                           context,
+                           MaterialPageRoute(
+                             builder: (_) => DiaryScreen(
+                               socket: socket,
+                               conversationId: widget.conversationId,
+                               currentUserId: widget.currentUserId,
+                             ),
+                           ),
+                         ),
+                       ),
+                       IconButton(
+                         padding: EdgeInsets.zero,
+                         constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+                         icon: const Icon(Icons.more_vert_rounded, color: Colors.white, size: 22),
+                         tooltip: 'Menu',
+                         onPressed: _showThreeDotsMenu,
+                       ),
                     ],
                   ),
                 ),
@@ -4764,13 +4465,13 @@ class _ChatScreenState extends State<ChatScreen> {
                               style: TextStyle(color: AppTheme.primaryTeal, fontWeight: FontWeight.w900, fontSize: 11.5),
                             ),
                             Text(
-                              (pinnedMessage!['attachment_type'] ?? pinnedMessage!['attachmentType']) == 'image'
+                              pinnedMessage!['attachment_type'] == 'image'
                                   ? '📷 Photo'
-                                  : (pinnedMessage!['attachment_type'] ?? pinnedMessage!['attachmentType']) == 'audio'
+                                  : pinnedMessage!['attachment_type'] == 'audio'
                                       ? '🎤 Voice message'
-                                      : (pinnedMessage!['attachment_type'] ?? pinnedMessage!['attachmentType']) == 'file'
-                                          ? '📎 ${pinnedMessage!['attachment_name'] ?? pinnedMessage!['attachmentName'] ?? 'File'}'
-                                          : (pinnedMessage!['attachment_type'] ?? pinnedMessage!['attachmentType']) == 'location'
+                                      : pinnedMessage!['attachment_type'] == 'file'
+                                          ? '📎 ${pinnedMessage!['attachment_name'] ?? 'File'}'
+                                          : pinnedMessage!['attachment_type'] == 'location'
                                               ? '📍 Location'
                                               : (pinnedMessage!['message']?.toString().isNotEmpty == true ? pinnedMessage!['message'].toString() : 'Message'),
                               maxLines: 1,
@@ -5031,7 +4732,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               final message = displayList[index];
 
 
-                              final bool isMe = _isMessageFromMe(message);
+                              final bool isMe = message['isMe'] == true;
                               final bool isDeleted = message['isDeleted'] == true || message['is_deleted'] == true;
                               final bool isEdited = message['isEdited'] == true || message['is_edited'] == true;
                               final bool isUploading = message['isUploading'] == true;
@@ -5080,7 +4781,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                         ),
                                         child: Row(
                                           mainAxisSize: MainAxisSize.min,
-                                          children: ['❤️', '👍', '😂', '😮', '😢', '🙏'].map((emoji) {
+                                          children: ['â ¤ï¸ ', 'ðŸ‘ ', 'ðŸ˜‚', 'ðŸ˜®', 'ðŸ˜¢', 'ðŸ™ '].map((emoji) {
                                             return GestureDetector(
                                               onTap: () => _toggleReaction(message['id'], emoji),
                                               child: Padding(
@@ -5097,15 +4798,13 @@ class _ChatScreenState extends State<ChatScreen> {
                                       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
                                       child: Builder(
                                         builder: (context) {
-                                          final screenWidth = MediaQuery.of(context).size.width;
-                                          final maxBubbleWidth = (screenWidth * 0.75).clamp(260.0, 480.0);
                                           final bool isImageMessage = !isDeleted && formattedImgUrl != null && message['attachmentType'] == 'image';
                                           final bool hasCaption = isImageMessage && message['message'] != null && message['message'].toString().trim().isNotEmpty;
                                           final bool hasReply = message['replyToMessageId'] != null;
 
                                           return Container(
                                             constraints: BoxConstraints(
-                                              maxWidth: maxBubbleWidth,
+                                              maxWidth: isImageMessage ? 295 : 280,
                                               minWidth: isImageMessage ? 200 : 0,
                                             ),
                                             margin: const EdgeInsets.only(bottom: 8),
@@ -5166,7 +4865,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                                               message['replySenderId'] ?? message['reply_sender_id'],
                                                               message['replySenderName'] ?? message['reply_sender_name'],
                                                               message['replySenderId'] != null &&
-                                                                  int.tryParse(message['replySenderId'].toString()) == currentUserId,
+                                                                  int.tryParse(message['replySenderId'].toString()) == widget.currentUserId,
                                                             ),
                                                             style: TextStyle(
                                                               fontWeight: FontWeight.w900,
@@ -5199,13 +4898,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                                 // Attachment / Text
                                                 if (isImageMessage) ...[
                                                   GestureDetector(
-                                                    onTap: () => _openFullImageViewer(
-                                                      formattedImgUrl,
-                                                      isLocalFile: isLocalFile,
-                                                      nonce: message['nonce']?.toString(),
-                                                      isEncrypted: message['isEncrypted'] == true || message['is_encrypted'] == true,
-                                                      localFilePath: message['localFilePath']?.toString(),
-                                                    ),
+                                                    onTap: () => _openFullImageViewer(formattedImgUrl, isLocalFile: isLocalFile),
                                                     child: ClipRRect(
                                                       borderRadius: BorderRadius.circular(15),
                                                       child: Stack(
@@ -5213,10 +4906,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                                         children: [
                                                           _buildEncryptedImageWidget(
                                                             url: formattedImgUrl,
-                                                            nonce: message['nonce']?.toString(),
+                                                            nonce: message['nonce'],
                                                             isEncrypted: message['isEncrypted'] == true || message['is_encrypted'] == true,
                                                             isLocalFile: isLocalFile,
-                                                            localFilePath: message['localFilePath']?.toString(),
                                                           ),
                                                           if (isUploading)
                                                             Container(
@@ -5299,7 +4991,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                                         ),
                                                       ),
                                                     ),
-                                                ] else if (!isDeleted && (message['attachmentType'] == 'location' || message['attachment_type'] == 'location')) ...[
+                                                ] else if (!isDeleted && message['attachmentType'] == 'location') ...[
                                                   Builder(
                                                     builder: (context) {
                                                       Map<String, dynamic> locData = {};
@@ -5385,12 +5077,8 @@ class _ChatScreenState extends State<ChatScreen> {
                                                   _VoiceMessagePlayer(
                                                     url: formattedImgUrl ?? '',
                                                     isLocalFile: isLocalFile,
-                                                    localFilePath: message['localFilePath']?.toString(),
                                                     isMe: isMe,
                                                     headers: _authHeaders,
-                                                    isEncrypted: message['isEncrypted'] == true || message['is_encrypted'] == true,
-                                                    nonce: message['nonce']?.toString(),
-                                                    sharedKey: _sharedSecretKey,
                                                   ),
                                                 ] else if (!isDeleted && message['attachmentUrl'] != null && message['attachmentType'] == 'file') ...[
                                                   Builder(
@@ -5411,8 +5099,6 @@ class _ChatScreenState extends State<ChatScreen> {
                                                               fileName: cleanDocName,
                                                               isMe: isMe,
                                                               isLocalFile: isLocalFile,
-                                                              isEncryptedMedia: message['isEncrypted'] == true || message['is_encrypted'] == true,
-                                                              mediaNonce: message['nonce']?.toString(),
                                                             );
                                                           }
                                                         },
@@ -5512,58 +5198,19 @@ class _ChatScreenState extends State<ChatScreen> {
                                                       );
                                                     },
                                                   ),
-                                                ] else if (!isDeleted) ...[
-                                                  Builder(
-                                                    builder: (context) {
-                                                      final String rawMsgStr = message['message']?.toString() ?? '';
-                                                      final bool isEnc = message['isEncrypted'] == true || message['is_encrypted'] == true;
-                                                      final String msgStr = rawMsgStr.trim().isNotEmpty
-                                                          ? rawMsgStr
-                                                          : (isEnc
-                                                              ? (message['rawMessage']?.toString().trim().isNotEmpty == true
-                                                                  ? message['rawMessage'].toString()
-                                                                  : '[Encrypted Message]')
-                                                              : ' ');
-
-                                                      final bool isCallLink = msgStr.contains('duochat.call') ||
-                                                          msgStr.contains('clock.call') ||
-                                                          msgStr.contains('Join my Clock Call') ||
-                                                          msgStr.contains('Join my DuoCall') ||
-                                                          msgStr.contains('Join my Duo Call');
-                                                      final bool isScheduledCall = msgStr.contains('Scheduled Duo Call') ||
-                                                          msgStr.contains('Scheduled Clock Call') ||
-                                                          msgStr.contains('Scheduled Call') ||
-                                                          msgStr.contains('📅 Scheduled') ||
-                                                          msgStr.contains('📆 Scheduled');
-
-                                                      if (isCallLink) {
-                                                        return _buildCallLinkCard(messageText: msgStr, isMe: isMe, isDark: isDark);
-                                                      } else if (isScheduledCall) {
-                                                        return _buildScheduledCallCard(messageText: msgStr, isMe: isMe, isDark: isDark);
-                                                      }
-
-                                                      return SelectableText(
-                                                        msgStr,
-                                                        style: TextStyle(
-                                                          color: isMe
-                                                              ? Colors.white
-                                                              : (isDark ? Colors.white : const Color(0xFF111B21)),
-                                                          fontSize: 15,
-                                                          height: 1.25,
-                                                          fontWeight: FontWeight.w800,
-                                                        ),
-                                                      );
-                                                    },
-                                                  ),
                                                 ] else ...[
                                                   SelectableText(
-                                                    'This message was deleted',
+                                                    isDeleted ? 'This message was deleted' : message['message'].toString(),
                                                     style: TextStyle(
-                                                      color: Colors.grey.shade500,
+                                                      color: isMe
+                                                          ? Colors.white
+                                                          : (isDeleted
+                                                              ? Colors.grey.shade500
+                                                              : (isDark ? Colors.white : const Color(0xFF111B21))),
                                                       fontSize: 15,
                                                       height: 1.25,
-                                                      fontWeight: FontWeight.w500,
-                                                      fontStyle: FontStyle.italic,
+                                                      fontWeight: isDeleted ? FontWeight.w500 : FontWeight.w800,
+                                                      fontStyle: isDeleted ? FontStyle.italic : FontStyle.normal,
                                                     ),
                                                   ),
                                                 ],
@@ -5659,7 +5306,59 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
               ),
             ),
-            if (isOtherUserTyping)
+            // NEW: Live Typing Preview — shows the peer's exact in-progress
+            // text (ghost-style) whenever we have it; falls back to the
+            // plain "...is typing" dots if we don't (e.g. they've turned
+            // their live preview off, or no text has reached us yet).
+            if (isOtherUserTyping && peerLiveTypingText.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(left: 16, right: 16, bottom: 6),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 280),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: (isDark ? Colors.white : AppTheme.primaryTeal).withValues(alpha: 0.10),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: AppTheme.primaryTeal.withValues(alpha: 0.35),
+                          style: BorderStyle.solid,
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.edit_rounded, size: 11, color: AppTheme.primaryTeal.withValues(alpha: 0.7)),
+                              const SizedBox(width: 4),
+                              Text(
+                                'typing live…',
+                                style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w700, color: AppTheme.primaryTeal.withValues(alpha: 0.7)),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            peerLiveTypingText,
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontStyle: FontStyle.italic,
+                              color: isDark ? Colors.white70 : const Color(0xFF111B21).withValues(alpha: 0.75),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              )
+            else if (isOtherUserTyping)
               Padding(
                 padding: const EdgeInsets.only(left: 16, right: 16, bottom: 6),
                 child: Align(
@@ -5892,67 +5591,56 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                       ),
                       IconButton(
+                        onPressed: _sendNudge,
+                        tooltip: 'Nudge',
+                        icon: Icon(
+                          Icons.back_hand_outlined,
+                          color: isDark ? Colors.grey.shade300 : const Color(0xFF111B21),
+                          size: 21,
+                        ),
+                      ),
+                      IconButton(
                         onPressed: _showAttachmentGridSheet,
+                        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
                         icon: Icon(
                           Icons.attach_file_rounded,
                           color: isDark ? Colors.grey.shade300 : const Color(0xFF111B21),
-                          size: 22,
+                          size: 21,
                         ),
                       ),
-                      HeartbeatButton(
-                        socket: socket,
-                        conversationId: widget.conversationId,
-                        currentUserId: currentUserId,
-                        isPartnerOnline: isOtherUserOnline,
-                      ),
-                      // Touch Together button
-                      GestureDetector(
-                        onTap: () => setState(() => _showFingerTrail = true),
-                        child: Container(
-                          margin: const EdgeInsets.only(right: 2),
-                          padding: const EdgeInsets.all(7),
-                          decoration: BoxDecoration(
-                            color: _showFingerTrail
-                                ? AppTheme.primaryTeal.withValues(alpha: 0.25)
-                                : Colors.transparent,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(
-                            Icons.gesture_rounded,
-                            color: _showFingerTrail
-                                ? AppTheme.primaryTeal
-                                : (isDark ? Colors.grey.shade300 : const Color(0xFF111B21)),
-                            size: 22,
-                          ),
+                      // ── Pink Circular Heartbeat Pulse Button ──
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 3),
+                        child: HeartbeatButton(
+                          socket: socket,
+                          conversationId: widget.conversationId,
+                          currentUserId: widget.currentUserId,
+                          isPartnerOnline: true,
                         ),
                       ),
-                      // Our Sky button
-                      GestureDetector(
-                        onTap: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => SharedSkyScreen(
-                                conversationId: widget.conversationId,
-                                currentUserId: currentUserId,
-                                partnerName: peerDisplayName.isNotEmpty ? peerDisplayName : 'Partner',
-                                socket: socket,
-                              ),
-                            ),
-                          );
-                        },
-                        child: Container(
-                          margin: const EdgeInsets.only(right: 2),
-                          padding: const EdgeInsets.all(7),
-                          decoration: const BoxDecoration(
-                            color: Colors.transparent,
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(
-                            Icons.auto_awesome_rounded,
-                            color: Color(0xFFFFD700),
-                            size: 21,
-                          ),
+                      // ── Touch Together / Finger Trail Button ──
+                      IconButton(
+                        onPressed: _openFingerTrail,
+                        tooltip: 'Touch Together',
+                        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        icon: Icon(
+                          Icons.gesture_rounded,
+                          color: isDark ? Colors.grey.shade300 : const Color(0xFF111B21),
+                          size: 21,
+                        ),
+                      ),
+                      // ── Shared Sky Sparkles Button ──
+                      IconButton(
+                        onPressed: _openSharedSky,
+                        tooltip: 'Shared Sky',
+                        constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        icon: Icon(
+                          Icons.auto_awesome_rounded,
+                          color: isDark ? const Color(0xFFFFD54F) : const Color(0xFFFFB300),
+                          size: 20,
                         ),
                       ),
                       const SizedBox(width: 2),
@@ -5992,6 +5680,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             )
                           : GestureDetector(
                               onTap: sendMessage,
+                              onLongPress: _showScheduleMessageDialog,
                               child: Container(
                                 width: 42,
                                 height: 42,
@@ -6077,40 +5766,75 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
               ),
-
           ],
         ),
       ),
 
-      // Realtime Heartbeat Overlay when receiving heartbeat from partner
-      if (_isReceivingHeartbeat)
-        const Positioned.fill(
-          child: HeartbeatOverlay(),
-        ),
-
-      // Touch Together (Live Finger Trail) full-screen overlay
-      if (_showFingerTrail)
+      // NEW: Nudge / "Thinking of you" full-screen flash overlay
+      if (_showNudgeOverlay)
         Positioned.fill(
-          child: FingerTrailOverlay(
-            currentUserId: currentUserId,
-            onClose: () => setState(() => _showFingerTrail = false),
+          child: IgnorePointer(
+            child: AnimatedOpacity(
+              opacity: _showNudgeOverlay ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 250),
+              child: Container(
+                color: Colors.black45,
+                child: Center(
+                  child: TweenAnimationBuilder<double>(
+                    tween: Tween(begin: 0.6, end: 1.0),
+                    duration: const Duration(milliseconds: 350),
+                    curve: Curves.elasticOut,
+                    builder: (context, scale, child) => Transform.scale(scale: scale, child: child),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 20),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(24),
+                        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 20)],
+                      ),
+                      child: const Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('👋', style: TextStyle(fontSize: 48)),
+                          SizedBox(height: 8),
+                          Text('Thinking of you', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: Color(0xFF111B21))),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ),
         ),
 
-      // Live Hug Received Animation Overlay
-      if (_currentReceivedHug != null)
-        HugAnimatedOverlay(
-          hug: _currentReceivedHug!,
-          onDismiss: () => setState(() => _currentReceivedHug = null),
+      // Heartbeat Overlay
+      if (_showHeartbeatOverlay)
+        HeartbeatOverlay(
+          onClose: () => setState(() => _showHeartbeatOverlay = false),
         ),
 
-      // Kiss Sync Interactive Matchmaker Overlay
-      if (_showKissSyncModal)
+      // Finger Trail Overlay
+      if (_showFingerTrailOverlay)
+        FingerTrailOverlay(
+          currentUserId: widget.currentUserId,
+          onClose: () => setState(() => _showFingerTrailOverlay = false),
+        ),
+
+      // Hug Overlay
+      if (_activeIncomingHug != null)
+        HugAnimatedOverlay(
+          hug: _activeIncomingHug!,
+          onDismiss: () => setState(() => _activeIncomingHug = null),
+        ),
+
+      // Kiss Sync Overlay
+      if (_showKissOverlay)
         KissSyncOverlay(
           conversationId: widget.conversationId,
-          currentUserId: currentUserId,
+          currentUserId: widget.currentUserId,
           partnerName: peerDisplayName.isNotEmpty ? peerDisplayName : 'Partner',
-          onClose: () => setState(() => _showKissSyncModal = false),
+          onClose: () => setState(() => _showKissOverlay = false),
         ),
     ],
   ),
@@ -6124,22 +5848,14 @@ class _ChatScreenState extends State<ChatScreen> {
 class _VoiceMessagePlayer extends StatefulWidget {
   final String url;
   final bool isLocalFile;
-  final String? localFilePath;   // sender's own unencrypted local file
   final bool isMe;
   final Map<String, String> headers;
-  final bool isEncrypted;
-  final String? nonce;
-  final SecretKey? sharedKey;    // E2EE shared key for decryption
 
   const _VoiceMessagePlayer({
     required this.url,
     required this.isLocalFile,
-    this.localFilePath,
     required this.isMe,
     required this.headers,
-    this.isEncrypted = false,
-    this.nonce,
-    this.sharedKey,
   });
 
   @override
@@ -6150,7 +5866,6 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
   final AudioPlayer _player = AudioPlayer();
   bool _isPlaying = false;
   bool _isLoaded = false;
-  bool _isDecrypting = false;
   Duration _duration = Duration.zero;
   Duration _position = Duration.zero;
 
@@ -6190,43 +5905,17 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
         return;
       }
       if (!_isLoaded) {
-        // Sender's own local plaintext file — play directly
-        if (widget.localFilePath != null && !kIsWeb && File(widget.localFilePath!).existsSync()) {
-          await _player.play(DeviceFileSource(widget.localFilePath!));
-          _isLoaded = true;
-          return;
-        }
         if (widget.isLocalFile && !kIsWeb) {
           await _player.play(DeviceFileSource(widget.url));
-          _isLoaded = true;
-          return;
+        } else {
+          await _player.play(UrlSource(widget.url));
         }
-        // Encrypted remote audio — fetch, decrypt, write to temp, play
-        if (widget.isEncrypted && widget.nonce != null && widget.sharedKey != null) {
-          if (mounted) setState(() => _isDecrypting = true);
-          try {
-            final response = await http.get(Uri.parse(widget.url), headers: widget.headers);
-            if (response.statusCode != 200) throw Exception('Fetch failed ${response.statusCode}');
-            final plainBytes = await EncryptionService().decryptBytes(
-              response.bodyBytes, widget.nonce!, widget.sharedKey!);
-            final tempDir = await getTemporaryDirectory();
-            final tempFile = File('${tempDir.path}/voice_dec_${DateTime.now().millisecondsSinceEpoch}.m4a');
-            await tempFile.writeAsBytes(plainBytes);
-            await _player.play(DeviceFileSource(tempFile.path));
-            _isLoaded = true;
-          } finally {
-            if (mounted) setState(() => _isDecrypting = false);
-          }
-          return;
-        }
-        // Plaintext remote audio
-        await _player.play(UrlSource(widget.url));
         _isLoaded = true;
       } else {
         await _player.resume();
       }
     } catch (e) {
-      debugPrint('Error playing voice message: $e');
+      debugPrint("Error playing voice message: $e");
     }
   }
 
@@ -6260,7 +5949,7 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
         mainAxisSize: MainAxisSize.min,
         children: [
           GestureDetector(
-            onTap: _isDecrypting ? null : _togglePlay,
+            onTap: _togglePlay,
             child: Container(
               width: 36,
               height: 36,
@@ -6270,19 +5959,11 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
                     : AppTheme.primaryTeal.withValues(alpha: 0.15),
                 shape: BoxShape.circle,
               ),
-              child: _isDecrypting
-                  ? const SizedBox(
-                      width: 18, height: 18,
-                      child: Padding(
-                        padding: EdgeInsets.all(9),
-                        child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.primaryTeal),
-                      ),
-                    )
-                  : Icon(
-                      _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                      color: fg,
-                      size: 22,
-                    ),
+              child: Icon(
+                _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                color: fg,
+                size: 22,
+              ),
             ),
           ),
           const SizedBox(width: 8),
@@ -6306,11 +5987,9 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
                     Icon(Icons.mic_rounded, size: 12, color: fg.withValues(alpha: 0.7)),
                     const SizedBox(width: 3),
                     Text(
-                      _isDecrypting
-                          ? 'Decrypting...'
-                          : _duration.inMilliseconds > 0
-                              ? _fmt(hasElapsed ? _position : _duration)
-                              : 'Voice message',
+                      _duration.inMilliseconds > 0
+                          ? _fmt(hasElapsed ? _position : _duration)
+                          : 'Voice message',
                       style: TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w700,

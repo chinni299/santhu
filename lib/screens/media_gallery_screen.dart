@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:cryptography/cryptography.dart';
 import 'package:path_provider/path_provider.dart';
@@ -168,107 +169,210 @@ class _MediaGalleryScreenState extends State<MediaGalleryScreen> {
     return decrypted;
   }
 
-  Future<void> _saveImageToGallery(String url, String? nonce, bool isEncrypted, Uint8List? preloadedBytes) async {
-    try {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Row(
-              children: [
-                SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                ),
-                SizedBox(width: 12),
-                Text("Saving to Gallery..."),
-              ],
-            ),
-            duration: Duration(seconds: 1),
+  /// Saves a PHOTO to the phone's public gallery.
+  /// Android: writes to Pictures/Clock and triggers MediaScanner so the OS
+  ///          gallery indexes the file immediately.
+  /// iOS: writes to app Documents (PHPhotoLibrary requires a separate plugin).
+  /// This is the ONLY function in the app that writes to a public/gallery path.
+  /// It is called exclusively from the explicit "Save to Gallery" button tap.
+  Future<void> _saveImageToGallery(
+    String url,
+    String? nonce,
+    bool isEncrypted,
+    Uint8List? preloadedBytes,
+  ) async {
+    // Show progress snackbar while working
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Row(
+            children: [
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+              ),
+              SizedBox(width: 12),
+              Text('Saving to Gallery…'),
+            ],
           ),
-        );
-      }
+          duration: Duration(seconds: 60), // dismissed explicitly below
+        ),
+      );
+    }
 
+    try {
+      // ── Step 1: obtain bytes in memory only ───────────────────────────
+      // The private cached copy (_decryptedBytesCache) is NEVER moved or
+      // deleted — we only read bytes then write a SEPARATE copy below.
       Uint8List? bytes = preloadedBytes;
       if (bytes == null || bytes.isEmpty) {
         if (isEncrypted && nonce != null && nonce.isNotEmpty) {
           bytes = await _fetchAndDecryptMediaBytes(url, nonce);
         } else {
           final res = await http.get(Uri.parse(url), headers: _authHeaders);
-          if (res.statusCode == 200) {
-            bytes = res.bodyBytes;
-          }
+          if (res.statusCode == 200) bytes = res.bodyBytes;
         }
       }
 
       if (bytes == null || bytes.isEmpty) {
-        throw Exception("Could not load image file");
+        throw Exception('Could not load image file');
       }
 
+      // ── Web ────────────────────────────────────────────────────────────
       if (kIsWeb) {
         if (mounted) {
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Image saved successfully 📷")),
+            const SnackBar(content: Text('Image saved ✅')),
           );
         }
         return;
       }
 
-      if (Platform.isAndroid) {
-        await Permission.storage.request();
-        await Permission.photos.request();
-      }
-
-      Directory? targetDir;
-      if (Platform.isAndroid) {
-        final picturesDir = Directory('/storage/emulated/0/Pictures/Clock');
-        if (!await picturesDir.exists()) {
-          try {
-            await picturesDir.create(recursive: true);
-          } catch (_) {}
-        }
-        if (await picturesDir.exists()) {
-          targetDir = picturesDir;
-        } else {
-          final dcimDir = Directory('/storage/emulated/0/DCIM/Clock');
-          if (!await dcimDir.exists()) {
-            try {
-              await dcimDir.create(recursive: true);
-            } catch (_) {}
-          }
-          if (await dcimDir.exists()) {
-            targetDir = dcimDir;
-          }
-        }
-      }
-
-      targetDir ??= await getExternalStorageDirectory() ?? await getApplicationDocumentsDirectory();
-
+      // ── Step 2: resolve gallery-visible target directory ────────────────
       final filename = 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg';
-      final savedFile = File('${targetDir.path}/$filename');
-      await savedFile.writeAsBytes(bytes);
+      File savedFile;
 
+      if (Platform.isAndroid) {
+        // Request write permission (needed on Android < 10)
+        await Permission.storage.request();
+
+        Directory? targetDir;
+        for (final candidate in [
+          '/storage/emulated/0/Pictures/Clock',
+          '/storage/emulated/0/DCIM/Clock',
+        ]) {
+          final dir = Directory(candidate);
+          if (!await dir.exists()) {
+            try { await dir.create(recursive: true); } catch (_) {}
+          }
+          if (await dir.exists()) {
+            targetDir = dir;
+            break;
+          }
+        }
+        targetDir ??= await getExternalStorageDirectory()
+            ?? await getApplicationDocumentsDirectory();
+
+        savedFile = File('${targetDir.path}/$filename');
+        await savedFile.writeAsBytes(bytes);
+
+        // Trigger MediaScanner so the OS Gallery indexes the file immediately
+        try {
+          const scanChannel = MethodChannel('duo_chat/media_scanner');
+          await scanChannel.invokeMethod<void>('scanFile', {'path': savedFile.path});
+        } catch (scanErr) {
+          // Channel not registered yet; file appears after OS periodic scan
+          debugPrint('[Gallery] MediaScanner channel unavailable: $scanErr');
+        }
+      } else if (Platform.isIOS) {
+        // iOS: write to app Documents. PHPhotoLibrary needs image_gallery_saver
+        // plugin (not in pubspec.yaml); user can share to Photos from here.
+        final docsDir = await getApplicationDocumentsDirectory();
+        savedFile = File('${docsDir.path}/$filename');
+        await savedFile.writeAsBytes(bytes);
+      } else {
+        final docsDir = await getApplicationDocumentsDirectory();
+        savedFile = File('${docsDir.path}/$filename');
+        await savedFile.writeAsBytes(bytes);
+      }
+
+      // ── Step 3: clear success confirmation ────────────────────────────
       if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Saved directly to Gallery ($filename) 📷"),
+            content: Text(
+              Platform.isIOS
+                  ? 'Saved to app documents ($filename) ✅'
+                  : 'Saved to Gallery ($filename) ✅',
+            ),
             backgroundColor: AppTheme.primaryTeal,
-            duration: const Duration(seconds: 3),
+            duration: const Duration(seconds: 4),
             action: SnackBarAction(
-              label: "Open",
+              label: 'Open',
               textColor: Colors.white,
-              onPressed: () {
-                OpenFilex.open(savedFile.path);
-              },
+              onPressed: () => OpenFilex.open(savedFile.path),
             ),
           ),
         );
       }
     } catch (e) {
-      debugPrint("Save to gallery error: $e");
+      debugPrint('Save to gallery error: $e');
       if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Error saving image: $e")),
+          SnackBar(content: Text('Error saving image: $e')),
+        );
+      }
+    }
+  }
+
+  /// Downloads a non-image attachment (voice, document) to the app's PRIVATE
+  /// Documents directory so it can be opened with an external app.
+  /// This NEVER writes to a public gallery / Pictures folder.
+  Future<void> _downloadFileToDocs(
+    String url,
+    String? nonce,
+    bool isEncrypted,
+    String displayName,
+  ) async {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Downloading $displayName…'),
+          duration: const Duration(seconds: 60),
+        ),
+      );
+    }
+    try {
+      Uint8List? bytes;
+      if (isEncrypted && nonce != null && nonce.isNotEmpty) {
+        bytes = await _fetchAndDecryptMediaBytes(url, nonce);
+      } else {
+        final res = await http.get(Uri.parse(url), headers: _authHeaders);
+        if (res.statusCode == 200) bytes = res.bodyBytes;
+      }
+
+      if (bytes == null || bytes.isEmpty) throw Exception('Empty response');
+
+      if (!kIsWeb) {
+        // Always write to the app's private Documents directory
+        final docsDir = await getApplicationDocumentsDirectory();
+        final safeName = displayName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+        final savedFile = File('${docsDir.path}/$safeName');
+        await savedFile.writeAsBytes(bytes);
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Downloaded $displayName ✅'),
+              backgroundColor: AppTheme.primaryTeal,
+              duration: const Duration(seconds: 4),
+              action: SnackBarAction(
+                label: 'Open',
+                textColor: Colors.white,
+                onPressed: () => OpenFilex.open(savedFile.path),
+              ),
+            ),
+          );
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Downloaded $displayName ✅')),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('Download file error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error downloading $displayName: $e')),
         );
       }
     }
@@ -526,9 +630,13 @@ class _MediaGalleryScreenState extends State<MediaGalleryScreen> {
           onTap: url != null
               ? () async {
                   if (item['attachment_type'] == 'image') {
+                    // Images go through the full-screen viewer with explicit
+                    // "Save to Gallery" button — never auto-downloaded
                     _openPhoto(url, isEncrypted, nonce);
                   } else {
-                    await _saveImageToGallery(url, nonce, isEncrypted, null);
+                    // Voice messages and documents — download to PRIVATE
+                    // app Documents directory, NOT to any gallery/Pictures path
+                    await _downloadFileToDocs(url, nonce, isEncrypted, name);
                   }
                 }
               : null,

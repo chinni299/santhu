@@ -107,13 +107,23 @@ pool.query(`
   console.error("Migration error for scheduled_messages table:", err.message);
 });
 
-// Migration for Message Reactions
+// Migration for Shared Diary
 pool.query(`
-  ALTER TABLE messages ADD COLUMN IF NOT EXISTS reactions JSONB DEFAULT '{}'::jsonb;
+  CREATE TABLE IF NOT EXISTS diary_entries (
+    id SERIAL PRIMARY KEY,
+    conversation_id INTEGER NOT NULL,
+    author_id INTEGER NOT NULL,
+    entry_text TEXT NOT NULL,
+    mood VARCHAR(10),
+    photo_url TEXT,
+    entry_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    is_deleted BOOLEAN DEFAULT false,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+  );
 `).then(() => {
-  console.log("Messages table reactions column verified ✅");
+  console.log("diary_entries table verified ✅");
 }).catch((err) => {
-  console.error("Migration error for reactions column:", err.message);
+  console.error("Migration error for diary_entries table:", err.message);
 });
 
 // Migration for Shared Countdown / Anniversary Tracker
@@ -839,7 +849,7 @@ router.get("/media/:conversationId", async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT id, conversation_id, sender_id, attachment_url, attachment_type, attachment_name, attachment_size, is_encrypted, nonce, created_at
+      `SELECT id, conversation_id, sender_id, attachment_url, attachment_type, attachment_name, attachment_size, created_at
        FROM messages
        WHERE conversation_id = $1
          AND is_deleted = false
@@ -982,6 +992,115 @@ router.get("/special-dates/:conversationId", async (req, res) => {
   } catch (error) {
     console.error("Get special dates error:", error.message);
     res.status(500).json({ success: false, message: "Failed to fetch special dates" });
+  }
+});
+
+// GET SHARED DIARY ENTRIES FOR A CONVERSATION
+router.get("/diary/:conversationId", async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const authUserId = req.user.id;
+
+    const memberCheck = await pool.query(
+      "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+      [conversationId, authUserId]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ success: false, message: "Not authorized for this conversation" });
+    }
+
+    const result = await pool.query(
+      `SELECT d.id, d.conversation_id, d.author_id, u.name AS author_name,
+              d.entry_text, d.mood, d.photo_url, d.entry_date, d.created_at
+       FROM diary_entries d
+       LEFT JOIN users u ON u.id = d.author_id
+       WHERE d.conversation_id = $1 AND d.is_deleted = false
+       ORDER BY d.entry_date DESC, d.created_at DESC`,
+      [conversationId]
+    );
+
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error("Get diary entries error:", error.message);
+    res.status(500).json({ success: false, message: "Failed to fetch diary entries" });
+  }
+});
+
+// UPLOAD A PHOTO FOR A DIARY ENTRY (returns the URL; entry itself is created via socket)
+router.post("/diary/upload-photo", uploadSingleFile, async (req, res) => {
+  try {
+    const { conversationId } = req.body;
+    const file = req.file;
+    const authUserId = req.user.id;
+
+    if (!conversationId || !file) {
+      if (file && file.path && fs.existsSync(file.path)) {
+        try { fs.unlinkSync(file.path); } catch (_) {}
+      }
+      return res.status(400).json({ success: false, message: "conversationId and file are required" });
+    }
+
+    const memberCheck = await pool.query(
+      "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+      [conversationId, authUserId]
+    );
+    if (memberCheck.rows.length === 0) {
+      if (file.path && fs.existsSync(file.path)) {
+        try { fs.unlinkSync(file.path); } catch (_) {}
+      }
+      return res.status(403).json({ success: false, message: "Not authorized for this conversation" });
+    }
+
+    const hostIp = req.headers.host || "localhost:5000";
+    const photoUrl = `http://${hostIp}/messages/diary/attachments/${file.filename}`;
+
+    res.status(201).json({ success: true, url: photoUrl });
+  } catch (error) {
+    console.error("Diary photo upload error:", error.message);
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+    }
+    res.status(500).json({ success: false, message: "Failed to upload photo" });
+  }
+});
+
+// GET A DIARY PHOTO (authorized by conversation membership, not tied to the messages table)
+router.get("/diary/attachments/:filename", async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const authUserId = req.user.id;
+    const safeFilename = path.basename(filename).replace(/[^a-zA-Z0-9.\-_]/g, "");
+
+    const entryRes = await pool.query(
+      "SELECT conversation_id FROM diary_entries WHERE photo_url LIKE $1 LIMIT 1",
+      [`%${safeFilename}`]
+    );
+    if (entryRes.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Photo unavailable" });
+    }
+
+    const memberCheck = await pool.query(
+      "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+      [entryRes.rows[0].conversation_id, authUserId]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ success: false, message: "Not authorized" });
+    }
+
+    const filePath = path.join(uploadsDir, safeFilename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, message: "Photo unavailable" });
+    }
+
+    const ext = path.extname(safeFilename).toLowerCase();
+    const mimeTypes = { ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif" };
+    res.setHeader("Content-Type", mimeTypes[ext] || "application/octet-stream");
+    res.setHeader("Content-Disposition", "inline");
+    res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
+    fs.createReadStream(filePath).pipe(res);
+  } catch (error) {
+    console.error("Diary photo fetch error:", error.message);
+    res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
 

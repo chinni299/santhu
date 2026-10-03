@@ -6,16 +6,18 @@ const jwt = require("jsonwebtoken");
 const authRoutes = require("./auth");
 const messageRoutes = require("./messages");
 const cors = require("cors");
-const { registerHeartbeatHandlers } = require("./heartbeat_handler");
-const { registerFingerTrailHandlers } = require("./finger_trail_handler");
-const { sharedSkyRouter, registerSharedSkyHandlers } = require("./shared_sky_handler");
-const { hugKissRouter, registerHugKissHandlers } = require("./hug_kiss_handler");
 
 const pool = require("./db");
 const { redis, isRedisEnabled } = require("./redisClient");
 const admin = require("firebase-admin");
 const path = require("path");
 const fs = require("fs");
+
+// ── Feature Handler Modules ──────────────────────────────────────────────────
+const { registerHeartbeatHandlers } = require('./heartbeat_handler');
+const { registerFingerTrailHandlers } = require('./finger_trail_handler');
+const { hugKissRouter, registerHugKissHandlers } = require('./hug_kiss_handler');
+const { sharedSkyRouter, registerSharedSkyHandlers } = require('./shared_sky_handler');
 
 // Initialize Firebase Admin SDK
 const serviceAccountPath = path.join(__dirname, "config", "firebase-service-account.json");
@@ -73,10 +75,10 @@ app.all("/auth/register", (req, res) => {
 // Public /uploads static route removed for security (PHASE 3)
 app.use("/auth", authRoutes);
 app.use("/messages", messageRoutes);
-app.use("/shared-sky", sharedSkyRouter);
-app.use("/hug-kiss", hugKissRouter);
+app.use('/hug-kiss', hugKissRouter);
+app.use('/shared-sky', sharedSkyRouter);
 
-console.log("MESSAGES, SHARED SKY & HUG-KISS API REGISTERED ✅");
+console.log("MESSAGES API REGISTERED ✅");
 
 app.get("/", (req, res) => {
   res.json({
@@ -441,10 +443,6 @@ async function sweepExpiredLiveLocations() {
 
 // Socket.IO Connection Handler
 io.on("connection", (socket) => {
-  registerHeartbeatHandlers(io, socket, userSockets);
-  registerFingerTrailHandlers(io, socket);
-  registerSharedSkyHandlers(io, socket);
-  registerHugKissHandlers(io, socket, userSockets);
   const authUserId = socket.user?.userId || socket.user?.id;
   console.log(`[SERVER SOCKET] CLIENT CONNECTED: socketId=${socket.id}`);
   console.log(`[SERVER SOCKET] USER: ${authUserId}`);
@@ -476,6 +474,12 @@ io.on("connection", (socket) => {
       markUserPresentInRedis(numId);
     }, PRESENCE_HEARTBEAT_MS);
   }
+
+  // ── Feature Socket Handlers ──────────────────────────────────────────────
+  registerHeartbeatHandlers(io, socket, userSockets);
+  registerFingerTrailHandlers(io, socket);
+  registerHugKissHandlers(io, socket, userSockets);
+  registerSharedSkyHandlers(io, socket);
 
   // Join User Room
   socket.on("joinUserRoom", (data) => {
@@ -1119,6 +1123,43 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ==================================================
+  // LIVE TYPING PREVIEW — relays the exact in-progress text as it's typed.
+  // Deliberately NEVER written to the database (not even transiently) —
+  // it only ever exists in-flight on the socket connection, which is what
+  // makes this safe/appropriate for a private, consenting 2-person chat.
+  // Membership is checked once per socket (cached) since this fires on
+  // every keystroke and we don't want a DB round-trip per character.
+  // ==================================================
+  socket.on("liveTypingPreview", async (data) => {
+    try {
+      const { conversationId, text } = data || {};
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId) return;
+
+      if (socket.data.liveTypingMemberOk !== conversationId) {
+        const memberCheck = await pool.query(
+          "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+          [conversationId, senderId]
+        );
+        if (memberCheck.rows.length === 0) return;
+        socket.data.liveTypingMemberOk = conversationId; // cache the OK for this socket
+      }
+
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+      // Cap length defensively — this is a live preview, not a message transport
+      const safeText = typeof text === "string" ? text.slice(0, 2000) : "";
+
+      io.to(`user_${recipientId}`).emit("liveTypingPreview", {
+        conversationId: Number(conversationId),
+        senderId: Number(senderId),
+        text: safeText,
+      });
+    } catch (err) {
+      console.error("Error handling liveTypingPreview event:", err.message);
+    }
+  });
+
   // Stop Typing Event
   socket.on("stopTyping", async (data) => {
     try {
@@ -1253,6 +1294,70 @@ io.on("connection", (socket) => {
       }
     } catch (err) {
       console.error("Error in cancelScheduledMessage socket event:", err.message);
+    }
+  });
+
+  // ==================================================
+  // SHARED DIARY
+  // ==================================================
+  socket.on("addDiaryEntry", async (data) => {
+    try {
+      const { conversationId, entryText, mood, photoUrl, entryDate } = data || {};
+      const authorId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !authorId || (!entryText && !photoUrl)) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, authorId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      const result = await pool.query(
+        `INSERT INTO diary_entries (conversation_id, author_id, entry_text, mood, photo_url, entry_date)
+         VALUES ($1, $2, $3, $4, $5, COALESCE($6, CURRENT_DATE))
+         RETURNING id, conversation_id, author_id, entry_text, mood, photo_url, entry_date, created_at`,
+        [conversationId, authorId, entryText || "", mood || null, photoUrl || null, entryDate || null]
+      );
+
+      const authorRes = await pool.query("SELECT name FROM users WHERE id = $1", [authorId]);
+      const entry = {
+        ...result.rows[0],
+        author_name: authorRes.rows[0]?.name || (Number(authorId) === 1 ? "User 1" : "User 2"),
+      };
+
+      const room = String(conversationId);
+      io.to(room).emit("diaryEntryAdded", { conversationId: Number(conversationId), entry });
+      console.log(`Diary entry added by User ${authorId} in conversation ${conversationId} 📔`);
+    } catch (err) {
+      console.error("Error in addDiaryEntry socket event:", err.message);
+    }
+  });
+
+  socket.on("deleteDiaryEntry", async (data) => {
+    try {
+      const { conversationId, id } = data || {};
+      const userId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !id || !userId) return;
+
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, userId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      // Either person can remove a shared diary entry (it's a joint journal)
+      const result = await pool.query(
+        "UPDATE diary_entries SET is_deleted = true WHERE id = $1 AND conversation_id = $2 RETURNING id",
+        [id, conversationId]
+      );
+
+      if (result.rowCount > 0) {
+        const room = String(conversationId);
+        io.to(room).emit("diaryEntryDeleted", { conversationId: Number(conversationId), id: Number(id) });
+        console.log(`Diary entry ${id} deleted by User ${userId} in conversation ${conversationId} 📔🗑️`);
+      }
+    } catch (err) {
+      console.error("Error in deleteDiaryEntry socket event:", err.message);
     }
   });
 
@@ -1599,19 +1704,21 @@ io.on("connection", (socket) => {
   socket.on("webrtcOffer", async (data) => {
     try {
       const { conversationId, sdp } = data || {};
-      const senderId = Number(data?.senderId || data?.userId || socket.user?.userId || socket.data?.userId || 1);
-      if (!conversationId || !sdp) return;
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId || !sdp) return;
 
-      const recipientId = senderId === 1 ? 2 : 1;
-      const payload = {
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, senderId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+      io.to(`user_${recipientId}`).emit("webrtcOffer", {
         conversationId: Number(conversationId),
         sdp,
         senderId: Number(senderId),
-      };
-
-      io.to(`user_${recipientId}`).emit("webrtcOffer", payload);
-      socket.to(String(conversationId)).emit("webrtcOffer", payload);
-      console.log(`[WEBRTC] Relayed offer from User ${senderId} to User ${recipientId} in conv ${conversationId}`);
+      });
     } catch (err) {
       console.error("Error in webrtcOffer:", err.message);
     }
@@ -1620,19 +1727,21 @@ io.on("connection", (socket) => {
   socket.on("webrtcAnswer", async (data) => {
     try {
       const { conversationId, sdp } = data || {};
-      const senderId = Number(data?.senderId || data?.userId || socket.user?.userId || socket.data?.userId || 1);
-      if (!conversationId || !sdp) return;
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId || !sdp) return;
 
-      const recipientId = senderId === 1 ? 2 : 1;
-      const payload = {
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, senderId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+      io.to(`user_${recipientId}`).emit("webrtcAnswer", {
         conversationId: Number(conversationId),
         sdp,
         senderId: Number(senderId),
-      };
-
-      io.to(`user_${recipientId}`).emit("webrtcAnswer", payload);
-      socket.to(String(conversationId)).emit("webrtcAnswer", payload);
-      console.log(`[WEBRTC] Relayed answer from User ${senderId} to User ${recipientId} in conv ${conversationId}`);
+      });
     } catch (err) {
       console.error("Error in webrtcAnswer:", err.message);
     }
@@ -1641,18 +1750,21 @@ io.on("connection", (socket) => {
   socket.on("webrtcIceCandidate", async (data) => {
     try {
       const { conversationId, candidate } = data || {};
-      const senderId = Number(data?.senderId || data?.userId || socket.user?.userId || socket.data?.userId || 1);
-      if (!conversationId || !candidate) return;
+      const senderId = socket.user?.userId || socket.data?.userId;
+      if (!conversationId || !senderId || !candidate) return;
 
-      const recipientId = senderId === 1 ? 2 : 1;
-      const payload = {
+      const memberCheck = await pool.query(
+        "SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND user_id = $2",
+        [conversationId, senderId]
+      );
+      if (memberCheck.rows.length === 0) return;
+
+      const recipientId = Number(senderId) === 1 ? 2 : 1;
+      io.to(`user_${recipientId}`).emit("webrtcIceCandidate", {
         conversationId: Number(conversationId),
         candidate,
         senderId: Number(senderId),
-      };
-
-      io.to(`user_${recipientId}`).emit("webrtcIceCandidate", payload);
-      socket.to(String(conversationId)).emit("webrtcIceCandidate", payload);
+      });
     } catch (err) {
       console.error("Error in webrtcIceCandidate:", err.message);
     }

@@ -188,14 +188,17 @@ const openSkyViews = new Map(); // conversationId -> Set<userId>
 
 function registerSharedSkyHandlers(io, socket) {
   setIO(io);
-  const userId = Number(socket.user?.userId || socket.data?.userId);
-  if (!userId) return;
 
-  const partnerId = userId === 1 ? 2 : 1;
+  const getUserId = (data) => {
+    const raw = data?.userId || data?.senderId || socket.user?.userId || socket.user?.id || socket.data?.userId;
+    return Number(raw) || 1;
+  };
 
   // Partner opened Our Sky screen
   socket.on('sharedSky_open', (data) => {
     try {
+      const userId = getUserId(data);
+      const partnerId = userId === 1 ? 2 : 1;
       const convId = data?.conversationId ?? 1;
       const key = String(convId);
       if (!openSkyViews.has(key)) openSkyViews.set(key, new Set());
@@ -215,6 +218,8 @@ function registerSharedSkyHandlers(io, socket) {
   // Partner closed Our Sky screen
   socket.on('sharedSky_close', (data) => {
     try {
+      const userId = getUserId(data);
+      const partnerId = userId === 1 ? 2 : 1;
       const convId = data?.conversationId ?? 1;
       const key = String(convId);
       if (openSkyViews.has(key)) openSkyViews.get(key).delete(userId);
@@ -233,6 +238,8 @@ function registerSharedSkyHandlers(io, socket) {
   // Partner tap/hover on star (gives soft real-time glow to partner)
   socket.on('sharedSky_hover', (data) => {
     try {
+      const userId = getUserId(data);
+      const partnerId = userId === 1 ? 2 : 1;
       const convId = data?.conversationId ?? 1;
       const starIndex = data?.starIndex;
       const isHovering = data?.isHovering ?? true;
@@ -251,6 +258,8 @@ function registerSharedSkyHandlers(io, socket) {
   // Clean up on disconnect
   socket.on('disconnect', () => {
     try {
+      const userId = getUserId();
+      const partnerId = userId === 1 ? 2 : 1;
       openSkyViews.forEach((set, key) => {
         if (set.delete(userId)) {
           io.to(`user_${partnerId}`).emit('sharedSky_partnerStatus', {

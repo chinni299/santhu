@@ -147,50 +147,17 @@ function clearUserKiss(conversationId, userId) {
 // ── Real-Time Socket Event Handlers ─────────────────────────────────────────
 function registerHugKissHandlers(io, socket, userSockets) {
   setIO(io);
-  const userId = Number(socket.user?.userId || socket.data?.userId);
-  if (!userId) return;
 
-  const partnerId = userId === 1 ? 2 : 1;
-
-  // 1. Deliver any offline pending hugs immediately upon socket connection
-  (async () => {
-    try {
-      const { rows } = await pool.query(
-        `SELECT * FROM pending_hugs 
-         WHERE recipient_id = $1 AND is_delivered = false 
-         ORDER BY created_at ASC`,
-        [userId]
-      );
-
-      if (rows.length > 0) {
-        await pool.query(
-          `UPDATE pending_hugs 
-           SET is_delivered = true, delivered_at = NOW() 
-           WHERE recipient_id = $1 AND is_delivered = false`,
-          [userId]
-        );
-
-        for (const hug of rows) {
-          socket.emit('hug_received', {
-            id: hug.id,
-            conversationId: hug.conversation_id,
-            senderId: hug.sender_id,
-            senderName: hug.sender_name || (hug.sender_id === 1 ? 'User 1' : 'User 2'),
-            createdAt: hug.created_at,
-            isLive: false,
-            isOfflineDelivered: true,
-          });
-        }
-        console.log(`[HUG & KISS] Delivered ${rows.length} stored offline hugs to User ${userId} 🫂💌`);
-      }
-    } catch (err) {
-      console.error('[HUG & KISS] Pending hug delivery error:', err.message);
-    }
-  })();
+  const getUserId = (data) => {
+    const raw = data?.senderId || data?.userId || socket.user?.userId || socket.user?.id || socket.data?.userId;
+    return Number(raw) || 1;
+  };
 
   // ── Hug Real-Time Event ───────────────────────────────────────────────────
   socket.on('hug_send', async (data) => {
     try {
+      const userId = getUserId(data);
+      const partnerId = userId === 1 ? 2 : 1;
       const convId = Number(data?.conversationId || 1);
       const senderName = await getUserName(userId);
       const isOnline = userSockets && userSockets.has(partnerId) && userSockets.get(partnerId).size > 0;
@@ -230,19 +197,18 @@ function registerHugKissHandlers(io, socket, userSockets) {
   });
 
   // ── Kiss Sync Matchmaker Events ───────────────────────────────────────────
-  
-  // User touches down on the Kiss button
   socket.on('kiss_touch_down', (data) => {
     try {
+      const userId = getUserId(data);
+      const partnerId = userId === 1 ? 2 : 1;
       const convId = Number(data?.conversationId || 1);
-      const serverTime = Date.now(); // Strictly server timestamp authority
+      const serverTime = Date.now();
       const session = getSessionMap(convId);
 
       clearUserKiss(convId, userId);
 
       console.log(`[KISS SYNC] User ${userId} touch down at server time: ${serverTime} (conv: ${convId})`);
 
-      // 10-second graceful timeout if partner never joins
       const timeoutHandle = setTimeout(() => {
         clearUserKiss(convId, userId);
         socket.emit('kiss_timeout', {
@@ -261,7 +227,6 @@ function registerHugKissHandlers(io, socket, userSockets) {
 
       session.set(userId, userTouch);
 
-      // Tell partner that this user is holding the Kiss button
       io.to(`user_${partnerId}`).emit('kiss_partner_status', {
         conversationId: convId,
         partnerId: userId,
@@ -269,27 +234,20 @@ function registerHugKissHandlers(io, socket, userSockets) {
         serverTime,
       });
 
-      // Check if partner is also currently touching
       const partnerTouch = session.get(partnerId);
 
       if (partnerTouch && partnerTouch.isHolding) {
         const timeDiff = Math.abs(serverTime - partnerTouch.touchStartServerTime);
         console.log(`[KISS SYNC] Both users touching! Server time diff: ${timeDiff}ms`);
 
-        // Window requirement: within ~500ms
         if (timeDiff <= 500) {
           console.log(`[KISS SYNC] Match window passed (<= 500ms)! Syncing hold duration...`);
-
-          // Hold requirement: at least 1 second (1000ms) on both sides
-          // Calculate remaining hold time from the later touch
           const elapsed = serverTime - partnerTouch.touchStartServerTime;
           const remainingHold = Math.max(1000, 1000 - elapsed);
 
-          // Clear standalone 10s timeouts
           if (userTouch.timeoutHandle) clearTimeout(userTouch.timeoutHandle);
           if (partnerTouch.timeoutHandle) clearTimeout(partnerTouch.timeoutHandle);
 
-          // Notify both that partner is synced and holding together
           const syncStartPayload = {
             conversationId: convId,
             syncDiffMs: timeDiff,
@@ -298,9 +256,7 @@ function registerHugKissHandlers(io, socket, userSockets) {
           io.to(`user_${userId}`).emit('kiss_sync_matched', syncStartPayload);
           io.to(`user_${partnerId}`).emit('kiss_sync_matched', syncStartPayload);
 
-          // Trigger success after 1 second hold completes
           const successTimer = setTimeout(() => {
-            // Verify both are still holding
             const uT = session.get(userId);
             const pT = session.get(partnerId);
 
@@ -324,7 +280,6 @@ function registerHugKissHandlers(io, socket, userSockets) {
           userTouch.successTimer = successTimer;
           partnerTouch.successTimer = successTimer;
         } else {
-          // Time gap was larger than 500ms
           console.log(`[KISS SYNC] Touch gap was ${timeDiff}ms (> 500ms limit).`);
           socket.emit('kiss_sync_window_missed', {
             conversationId: convId,
@@ -338,15 +293,15 @@ function registerHugKissHandlers(io, socket, userSockets) {
     }
   });
 
-  // User releases finger from the Kiss button
   socket.on('kiss_touch_up', (data) => {
     try {
+      const userId = getUserId(data);
+      const partnerId = userId === 1 ? 2 : 1;
       const convId = Number(data?.conversationId || 1);
       const session = getSessionMap(convId);
       const userTouch = session.get(userId);
 
       if (userTouch) {
-        // If there was a pending success timer, cancel it because hold was broken early
         if (userTouch.successTimer) {
           clearTimeout(userTouch.successTimer);
           const partnerTouch = session.get(partnerId);
@@ -372,9 +327,10 @@ function registerHugKissHandlers(io, socket, userSockets) {
     }
   });
 
-  // Clean up on disconnect
   socket.on('disconnect', () => {
     try {
+      const userId = getUserId();
+      const partnerId = userId === 1 ? 2 : 1;
       activeKissSessions.forEach((session, convId) => {
         if (session.has(userId)) {
           clearUserKiss(convId, userId);
